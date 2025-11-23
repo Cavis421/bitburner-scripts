@@ -1,0 +1,6 @@
+# VS Code settings
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db

@@ -1,0 +1,134 @@
+/** @param {NS} ns */
+
+// Scan the whole network starting from "home"
+function getAllServers(ns) {
+    const visited = new Set();
+    const queue = ["home"];
+
+    while (queue.length > 0) {
+        const host = queue.shift();
+        if (visited.has(host)) continue;
+        visited.add(host);
+
+        for (const neighbor of ns.scan(host)) {
+            if (!visited.has(neighbor)) queue.push(neighbor);
+        }
+    }
+
+    return Array.from(visited);
+}
+
+// Choose the best hack target among rooted, hackable servers
+function chooseBestTarget(ns) {
+    const playerHack = ns.getHackingLevel();
+    const allServers = getAllServers(ns);
+    const pservs = new Set(ns.getPurchasedServers());
+
+    let bestHost = "n00dles";
+    let bestScore = 0;
+
+    for (const host of allServers) {
+        if (host === "home") continue;       // don't hack home
+        if (pservs.has(host)) continue;      // don't target purchased servers
+
+        const s = ns.getServer(host);
+
+        if (!s.hasAdminRights) continue;             // need root access
+        if (s.moneyMax <= 0) continue;               // must have money
+        if (s.requiredHackingSkill > playerHack) continue; // must be hackable
+
+        const maxMoney = s.moneyMax;
+        const minSec = s.minDifficulty || s.hackDifficulty || 1;
+        const hackTime = ns.getHackTime(host) || 1;
+
+        // Simple heuristic: higher money and shorter time and lower sec is better
+        const score = maxMoney / hackTime / minSec;
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestHost = host;
+        }
+    }
+
+    return bestHost;
+}
+
+export async function main(ns) {
+    ns.disableLog("ALL");
+
+    const HOME_RAM_RESERVE = 32; // Leave some RAM free on home
+
+    // Auto-detect best target
+    const TARGET = chooseBestTarget(ns);
+    ns.tprint(`🎯 STARTUP-HOME: Selected target: ${TARGET}`);
+
+    ns.tprint("🏠 STARTUP-HOME: Killing all processes on home...");
+
+    const myPid = ns.pid;
+    const processes = ns.ps("home");
+
+    // Kill everything except this script
+    for (const p of processes) {
+        if (p.pid === myPid) continue;
+        ns.kill(p.pid);
+    }
+
+    await ns.sleep(200); // allow cleanup
+
+    ns.tprint("✔️ Home is clean. Relaunching core automation...");
+
+    // Helper to start scripts safely
+    function safeExec(script, threads = 1, ...args) {
+        if (!ns.fileExists(script, "home")) {
+            ns.tprint(`⚠️ Missing script: ${script}`);
+            return;
+        }
+
+        const ramCost = ns.getScriptRam(script) * threads;
+        const used    = ns.getServerUsedRam("home");
+        const max     = ns.getServerMaxRam("home");
+        const free    = max - used - HOME_RAM_RESERVE;
+
+        if (ramCost > free) {
+            ns.tprint(`❌ Not enough RAM to start ${script} (${threads} threads)`);
+            return;
+        }
+
+        const pid = ns.exec(script, "home", threads, ...args);
+        if (pid === 0) {
+            ns.tprint(`❌ Failed to launch ${script}`);
+        } else {
+            ns.tprint(`▶️ Started ${script} (pid ${pid})`);
+        }
+    }
+
+    // ────────────────────────────────────────────────
+    // LAUNCH STACK (PSERV-MANAGER INCLUDED)
+    // ────────────────────────────────────────────────
+
+    const PSERV_TARGET_RAM = 2048; // GB per purchased server (tweak as you upgrade)
+
+    // Upgrade purchased servers toward PSERV_TARGET_RAM
+    safeExec("pserv-manager.js", 1, PSERV_TARGET_RAM);
+
+    // Keep pservs synced with HGW workers (if you're still using remote-hgw)
+    safeExec("pserv-hgw-sync.js", 1, TARGET);
+
+    // Main batcher on home
+    safeExec("timed-net-batcher.js", 1, TARGET);
+
+    // Root + deploy HGW to NPCs/pservs
+    safeExec("root-and-deploy-net.js", 1, TARGET);
+
+    // Quiet Hacknet automation
+    ////safeExec("hacknet-smart.js", 1);
+
+    // Status/monitor scripts
+    safeExec("botnet-hgw-status.js", 1);
+    safeExec("pserv-hgw-status.js", 1);   // or pserv-status.js
+    safeExec("hacknet-status.js", 1);     // Hacknet snapshot on startup
+    // Optional: one-shot dashboard
+    // safeExec("ops-dashboard.js", 1, TARGET);
+
+    ns.tprint("🎉 STARTUP-HOME COMPLETE — full automation online.");
+}
