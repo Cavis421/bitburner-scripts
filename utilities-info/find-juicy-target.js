@@ -1,4 +1,14 @@
-/** @param {NS} ns **/
+/** find-juicy-target.js
+ * Scan all reachable servers and pick a "juicy" target:
+ * - Good max money
+ * - Solid growth
+ * - Not too high security
+ * - Reasonable hack time (Formulas-aware when available)
+ *
+ * Prints the best target and a small leaderboard of top candidates.
+ *
+ * @param {NS} ns
+ **/
 export async function main(ns) {
     ns.disableLog("ALL");
 
@@ -15,7 +25,7 @@ export async function main(ns) {
 
         const s = ns.getServer(host);
         const maxMoney = s.moneyMax;
-        const minSec   = s.minDifficulty;
+        const minSec   = s.minDifficulty || 1;
         const growth   = s.serverGrowth;
         const reqHack  = s.requiredHackingSkill;
         const reqPorts = s.numOpenPortsRequired; // pre-root is fine here
@@ -27,7 +37,8 @@ export async function main(ns) {
         if (reqHack > hackingLevel) continue;   // too hard for us
         if (reqPorts > portCrackers) continue;  // need more port crackers
 
-        const hackTime = ns.getHackTime(host) || 1;
+        // Formulas-aware hack time when available, vanilla fallback otherwise
+        const hackTime = getJuicyHackTime(ns, host) || 1;
 
         // Higher money, growth, and lower sec/time → better
         const score = (maxMoney * growth) / (minSec * hackTime);
@@ -57,7 +68,7 @@ export async function main(ns) {
     ns.tprint(`🌱 Growth: ${best.growth.toFixed(1)}`);
     ns.tprint(`🛡 Min Security: ${best.minSec.toFixed(2)}`);
     ns.tprint(`⏱ Hack Time: ${(best.hackTime / 1000).toFixed(1)}s`);
-    ns.tprint(`📈 Score: ${best.score.toExponential(3)}`);
+    ns.tprint(`📈 Score: ${best.score.toExponential(3)}  (${hasFormulas(ns) ? "🧮 Formulas" : "vanilla"})`);
 
     // Print top 5 for context
     ns.tprint("=======================================");
@@ -74,6 +85,57 @@ export async function main(ns) {
             `Sec=${h.minSec.toFixed(1)} | ` +
             `T=${(h.hackTime / 1000).toFixed(1)}s`
         );
+    }
+}
+
+/**
+ * Formulas-aware hack time helper:
+ * - If Formulas.exe is present, use ns.formulas.hacking.hackTime()
+ *   assuming prepped-ish (min security, max money).
+ * - Otherwise, fall back to ns.getHackTime(host).
+ *
+ * @param {NS} ns
+ * @param {string} host
+ */
+function getJuicyHackTime(ns, host) {
+    if (!hasFormulas(ns)) {
+        return ns.getHackTime(host);
+    }
+
+    const player = ns.getPlayer();
+    const s = ns.getServer(host);
+
+    // Assume prepped for speed estimation
+    if (typeof s.minDifficulty === "number") {
+        s.hackDifficulty = s.minDifficulty;
+    }
+    if (typeof s.moneyMax === "number" && s.moneyMax > 0) {
+        s.moneyAvailable = s.moneyMax;
+    }
+
+    try {
+        return ns.formulas.hacking.hackTime(s, player);
+    } catch (_e) {
+        // Extremely defensive: if anything goes wrong, fall back
+        return ns.getHackTime(host);
+    }
+}
+
+/** Safe check for formulas availability.
+ *  This matches the pattern in other scripts: only touch ns.formulas
+ *  if Formulas.exe exists to avoid early-game errors.
+ * @param {NS} ns
+ */
+function hasFormulas(ns) {
+    try {
+        return (
+            ns.fileExists("Formulas.exe", "home") &&
+            ns.formulas &&
+            ns.formulas.hacking &&
+            typeof ns.formulas.hacking.hackTime === "function"
+        );
+    } catch (_e) {
+        return false;
     }
 }
 
