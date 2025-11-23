@@ -1,125 +1,205 @@
-/** @param {NS} ns **/
+/** xp-to-next-level.js
+ * Show XP needed to reach a target hacking level, plus ETA based on XP throughput.
+ *
+ * Uses:
+ *   - Formulas.exe (ns.formulas.skills.calculateExp) for exact XP thresholds.
+ *   - xp-throughput.txt (written by xp-throughput-monitor.js) for XP/sec estimate.
+ *
+ * Usage:
+ *   run xp-to-next-level.js                 // XP to next level (current + 1)
+ *   run xp-to-next-level.js --delta 10      // XP to +10 levels above current
+ *   run xp-to-next-level.js --to 2500       // XP to absolute level 2500
+ *
+ * Notes:
+ *   - If both --to and --delta are provided, --to is preferred.
+ *   - Requires Formulas.exe for accurate XP calculations.
+ *
+ * @param {NS} ns
+ */
 export async function main(ns) {
     ns.disableLog("ALL");
 
-    const currentLevel = ns.getHackingLevel();
-    const currentXp    = ns.getPlayer().exp.hacking;
+    const flags = ns.flags([
+        ["to", 0],      // absolute target level
+        ["delta", 0],   // levels above current
+    ]);
 
-    // Optional arg: target hacking level
-    // - If omitted or invalid: default to next level
-    // - If <= current level: we still show XP delta (likely <= 0)
-    const argLevel = ns.args.length > 0 ? Number(ns.args[0]) : NaN;
-    const targetLevel = Number.isFinite(argLevel) && argLevel > 0
-        ? Math.floor(argLevel)
-        : currentLevel + 1;
+    const METRIC_FILE = "xp-throughput.txt";
 
-    const targetXp = calculateHackingExp(targetLevel);
-    const needed   = targetXp - currentXp;
+    const player = ns.getPlayer();
+    const currentLevel = getHackLevel(player);
+    const currentXp    = player.exp?.hacking ?? player.hacking_exp ?? 0;
 
-    ns.tprint("==================================");
-    ns.tprint(`📈 Current hacking level: ${currentLevel}`);
-    ns.tprint(`🔢 Current XP: ${Math.floor(currentXp).toLocaleString()}`);
-    ns.tprint(`🎯 Target level: ${targetLevel}`);
-    ns.tprint(`🎯 Target XP:   ${Math.ceil(targetXp).toLocaleString()}`);
+    let targetLevel;
 
-    if (needed <= 0) {
-        ns.tprint(`✅ You already have enough XP for level ${targetLevel}.`);
-        ns.tprint("==================================");
+    const to    = Number(flags.to) || 0;
+    const delta = Number(flags.delta) || 0;
+
+    if (to > 0 && delta > 0) {
+        ns.tprint("⚠️ Both --to and --delta provided; preferring --to.");
+    }
+
+    if (to > 0) {
+        targetLevel = to;
+    } else if (delta > 0) {
+        targetLevel = currentLevel + delta;
+    } else {
+        targetLevel = currentLevel + 1; // default: next level only
+    }
+
+    if (!Number.isFinite(targetLevel) || targetLevel <= currentLevel) {
+        ns.tprint("❌ Target level must be greater than your current level.");
+        ns.tprint(`   Current: ${currentLevel}, Requested: ${targetLevel}`);
         return;
     }
 
-    ns.tprint(`📊 XP needed to reach level ${targetLevel}: ${Math.ceil(needed).toLocaleString()} XP`);
+    if (!hasFormulas(ns)) {
+        ns.tprint("❌ Formulas.exe not found or ns.formulas.skills unavailable.");
+        ns.tprint("   This script needs Formulas.exe to compute exact XP thresholds.");
+        ns.tprint("   Buy Formulas.exe from the Dark Web to enable xp-to-next-level.js.");
+        return;
+    }
 
-    // Try to estimate ETA using xp-throughput-monitor.js output
-    const eta = estimateEtaFromThroughput(ns, needed);
+    const hackingMult = getHackingSkillMult(player);
 
-    if (eta) {
-        const { xpPerSec, seconds } = eta;
-        const pretty = formatDuration(seconds);
+    // Exact XP requirement using Formulas API
+    const targetXp = ns.formulas.skills.calculateExp(targetLevel, hackingMult);
+    const xpNeededRaw = targetXp - currentXp;
+    const xpNeeded = Math.max(0, xpNeededRaw);
 
-        ns.tprint("----------------------------------");
-        ns.tprint(
-            `⌛ Estimated time at ~${xpPerSec.toFixed(2)} XP/s: ` +
-            `${pretty}`
-        );
-        ns.tprint("   (based on latest xp-throughput-monitor.js sample)");
+    ns.tprint("=======================================");
+    ns.tprint("        🧠 XP To Target Level");
+    ns.tprint("=======================================");
+    ns.tprint(`📊 Current hacking level: ${currentLevel}`);
+    ns.tprint(`🎯 Target hacking level:  ${targetLevel}`);
+    ns.tprint("---------------------------------------");
+    ns.tprint(`📈 Current XP:           ${formatXp(ns, currentXp)}`);
+    ns.tprint(`🎯 XP at target level:   ${formatXp(ns, targetXp)}`);
+    ns.tprint(`💡 XP needed:            ${formatXp(ns, xpNeeded)} XP`);
+
+    // Try to read XP/sec from xp-throughput.txt for ETA
+    const throughput = readThroughput(ns, METRIC_FILE);
+
+    if (throughput && throughput.xpPerSec > 0) {
+        const seconds = xpNeeded / throughput.xpPerSec;
+        const eta = formatDuration(seconds);
+
+        ns.tprint("---------------------------------------");
+        ns.tprint("⏱  ETA based on recent XP throughput");
+        ns.tprint(`📊 XP/sec (avg last ${throughput.windowSeconds.toFixed(0)}s): `
+            + `${throughput.xpPerSec.toFixed(2)} XP/s`);
+        ns.tprint(`⏳ Estimated time to target: ${eta}`);
     } else {
-        ns.tprint("----------------------------------");
-        ns.tprint("ℹ️ No valid XP/sec data found.");
-        ns.tprint("   Run `xp-throughput-monitor.js` and let it collect a sample first.");
+        ns.tprint("---------------------------------------");
+        ns.tprint("ℹ️ No recent XP throughput sample found.");
+        ns.tprint("   Run xp-throughput-monitor.js alongside your XP grinding");
+        ns.tprint("   to get an estimated time-to-level here.");
     }
 
-    ns.tprint("==================================");
+    ns.tprint("=======================================");
 }
 
 /**
- * Estimate ETA using the file written by xp-throughput-monitor.js.
- * Returns { xpPerSec, seconds } or null if no valid data.
+ * Safely detect if Formulas.exe + skills formulas are available.
+ * @param {NS} ns
  */
-function estimateEtaFromThroughput(ns, neededXp) {
-    const FILE = "xp-throughput.txt";
-    const raw  = ns.read(FILE);
-
-    if (!raw) return null;
-
-    let xpPerSec = null;
-
+function hasFormulas(ns) {
     try {
-        const parsed = JSON.parse(raw);
-        xpPerSec = Number(parsed.xpPerSec);
+        return (
+            ns.fileExists("Formulas.exe", "home") &&
+            ns.formulas &&
+            ns.formulas.skills &&
+            typeof ns.formulas.skills.calculateExp === "function"
+        );
     } catch (_e) {
-        // Fallback: maybe the file just contains a bare number
-        const num = Number(raw);
-        if (Number.isFinite(num) && num > 0) {
-            xpPerSec = num;
-        }
+        return false;
+    }
+}
+
+/**
+ * Get the player's hacking level in a forwards-compatible way.
+ */
+function getHackLevel(player) {
+    if (typeof player.hacking === "number") return player.hacking;
+    if (player.skills && typeof player.skills.hacking === "number") {
+        return player.skills.hacking;
+    }
+    return 0;
+}
+
+/**
+ * Get the hacking skill multiplier for formulas.skills.
+ * Falls back to 1 if not present.
+ */
+function getHackingSkillMult(player) {
+    // In current Bitburner, this is player.hacking_mult
+    if (typeof player.hacking_mult === "number") return player.hacking_mult;
+
+    // Fallback: if multipliers nested under player.mults, use that
+    if (player.mults && typeof player.mults.hacking === "number") {
+        return player.mults.hacking;
     }
 
-    if (!Number.isFinite(xpPerSec) || xpPerSec <= 0) return null;
-
-    const seconds = neededXp / xpPerSec;
-    if (!Number.isFinite(seconds) || seconds <= 0) return null;
-
-    return { xpPerSec, seconds };
+    return 1;
 }
 
 /**
- * Same formula as before: XP required for a given hacking level.
+ * Read XP throughput from the metric file written by xp-throughput-monitor.js.
+ * Returns null if missing or malformed.
+ *
+ * @param {NS} ns
+ * @param {string} file
  */
-function calculateHackingExp(level) {
-    return Math.exp((level + 200) / 32) - 534.5;
+function readThroughput(ns, file) {
+    try {
+        if (!ns.fileExists(file, "home")) return null;
+        const text = ns.read(file);
+        if (!text) return null;
+
+        const data = JSON.parse(text);
+        if (!data || typeof data.xpPerSec !== "number") return null;
+
+        return {
+            xpPerSec: data.xpPerSec,
+            windowSeconds: Number(data.windowSeconds) || 0,
+            ts: Number(data.ts) || 0,
+        };
+    } catch (_e) {
+        return null;
+    }
 }
 
 /**
- * Turn a duration in seconds into something readable like:
- *  "3m 12s", "1h 5m", "2d 3h 10m"
+ * Format XP with both raw and compact views when nFormat is available.
+ */
+function formatXp(ns, xp) {
+    if (typeof ns.nFormat === "function") {
+        return ns.nFormat(xp, "0,0.00") + ` (${xp.toFixed(2)})`;
+    }
+    return xp.toFixed(2);
+}
+
+/**
+ * Format a duration in seconds into a human-readable string.
+ * e.g. "3m 20s", "1h 5m", "2d 4h".
  */
 function formatDuration(totalSeconds) {
-    if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) {
-        return "0s";
-    }
+    totalSeconds = Math.max(0, Math.floor(totalSeconds));
 
-    let seconds = Math.floor(totalSeconds);
+    const days = Math.floor(totalSeconds / 86400);
+    totalSeconds -= days * 86400;
 
-    const days = Math.floor(seconds / 86400);
-    seconds -= days * 86400;
+    const hours = Math.floor(totalSeconds / 3600);
+    totalSeconds -= hours * 3600;
 
-    const hours = Math.floor(seconds / 3600);
-    seconds -= hours * 3600;
-
-    const minutes = Math.floor(seconds / 60);
-    seconds -= minutes * 60;
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds - minutes * 60;
 
     const parts = [];
-
     if (days > 0) parts.push(`${days}d`);
-    if (days > 0 || hours > 0) parts.push(`${hours}h`);
-    parts.push(`${minutes}m`);
-
-    // Only show seconds if we’re under ~1 day; keep it simple for long ETAs
-    if (days === 0) {
-        parts.push(`${seconds}s`);
-    }
+    if (hours > 0) parts.push(`${hours}h`);
+    if (minutes > 0) parts.push(`${minutes}m`);
+    if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
 
     return parts.join(" ");
 }
