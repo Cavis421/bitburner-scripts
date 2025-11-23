@@ -2,7 +2,7 @@
 
 > This file holds the full Bitburner script toolkit for my runs.  
 > Each script is stored in its own section, with the exact filename  
-> as used in-game. ChatGPT should treat these as the source of truth.
+> as used in-game.
 
 ---
 
