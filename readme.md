@@ -30,7 +30,6 @@ bitburner-scripts/
 ├── fleet-hacknet/              # Hacknet node automation & monitoring
 ├── ui-monitoring/              # Dashboards, process monitoring, XP throughput UI
 ├── utilities-info/             # Scanners, helpers, formulas logic, target finders
-├── organize-bitburner-scripts.ps1   # Repo maintenance tool
 └── Bitburner_Master_Codebase.md      # Single-file merged codebase for Netscript import
 ```
 
