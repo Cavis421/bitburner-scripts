@@ -162,13 +162,9 @@ These scripts assist with:
 
 # 📦 Master Codebase File
 
-`Bitburner_Master_Codebase.md` is a **single-file flattened codebase**, containing every script in this repo bundled together in sections:
+`Bitburner_Master_Codebase.md` is a **single-file flattened codebase**, containing every script in this repo bundled together.
 
-```md
-/* == FILE: utilities-info/find-juicy-target.js == */
-... contents ...
-/* == END FILE == */
-```
+
 
 You can:
 
