@@ -424,6 +424,7 @@ export async function main(ns) {
   }
 
   // Core stack
+  safeExec("darkweb-auto-buyer.js", 1);
   safeExec("pserv-manager.js",       1, PSERV_TARGET_RAM);
   safeExec("timed-net-batcher2.js",  1, batchTarget); // money target
   safeExec("root-and-deploy.js",     1, batchTarget);

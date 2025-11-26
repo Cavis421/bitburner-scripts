@@ -44,13 +44,15 @@ Botnet / HGW
 Fleet & Hacknet  
 - [clean-pservs.js](#clean-pservsjs)
 - [hacknet-manager.js](#hacknet-managerjs)
-- [hacknet-smart.js](#hacknet-smartjs) — Smart Hacknet upgrade logic  
-- [hacknet-status.js](#hacknet-statusjs) — Snapshot of Hacknet production
+- [hacknet-smart.js](#hacknet-smartjs)
+- [hacknet-status.js](#hacknet-statusjs)
 - [list-pservs.js](#list-pservsjs)
-- [pserv-manager.js](#pserv-managerjs) — Purchase/upgrade server fleet  
+- [pserv-manager.js](#pserv-managerjs)
 - [pserv-process-report.js](#pserv-process-reportjs)
 - [pserv-status.js](#pserv-statusjs)
+- [darkweb-auto-buyer.js](#darkweb-auto-buyerjs) — Auto-buy DarkWeb programs
 - [purchase_server_8gb.js](#purchase-server-8gbjs)
+
 
 UI / Monitoring  
 - [ops-dashboard.js](#ops-dashboardjs) — One-shot full operational dashboard  
@@ -6126,65 +6128,104 @@ export async function main(ns) {
 
 ---
 
-## daedalus-diag.js
-> Checks to see where I am compared to Daedalus invite
 
+---
+## darkweb-auto-buyer.js
+> Auto-purchases DarkWeb programs (port crackers + Formulas.exe) once you own TOR.
 ```js
-/** @param {NS} ns **/
+/** @param {NS} ns */
+/*
+ * darkweb-auto-buyer.js
+ *
+ * After you purchase TOR, run this once per BitNode.
+ * It will automatically purchase all DarkWeb programs that are
+ * referenced by startup-home-advanced.js:
+ *
+ *   - BruteSSH.exe
+ *   - FTPCrack.exe
+ *   - relaySMTP.exe
+ *   - HTTPWorm.exe
+ *   - SQLInject.exe
+ *   - Formulas.exe
+ *
+ * It loops until all target programs are owned, then exits.
+ */
+
 export async function main(ns) {
-    ns.disableLog("ALL");
+  ns.disableLog("ALL");
 
-    const p = ns.getPlayer();
+  // Programs actually used in startup-home-advanced.js
+  // (via countPortCrackers() and hasFormulas()).
+  const TARGET_PROGRAMS = [
+    "BruteSSH.exe",
+    "FTPCrack.exe",
+    "relaySMTP.exe",
+    "HTTPWorm.exe",
+    "SQLInject.exe",
+    "Formulas.exe",
+  ];
 
-    // --- SAFE FIELDS (No Source-Files Required) ---
-    const hacking = p.hacking;
+  const CHECK_INTERVAL = 60_000; // 60s between checks
 
-    // totalMoneyEarned is available without any SF
-    const moneyTotal = p.totalMoneyEarned ?? 0;
+  // Make sure we really have TOR / DarkWeb access
+  const player = ns.getPlayer();
+  const hasTor = player.tor || ns.serverExists("darkweb");
 
-    // getOwnedAugmentations() without arguments returns ONLY installed augs
-    const installedAugs = ns.getOwnedAugmentations();
-    const augCount = installedAugs.length;
+  if (!hasTor) {
+    ns.tprint("❌ darkweb-auto-buyer: No TOR router detected.");
+    ns.tprint("   Buy TOR from the DarkWeb hardware vendor first, then rerun this.");
+    return;
+  }
 
-    const factions = p.factions;
-    const hasDaedalusFaction = factions.includes("Daedalus");
+  ns.tprint("🎯 darkweb-auto-buyer: Starting DarkWeb program purchases...");
+  ns.tprint("   Target programs:");
+  for (const p of TARGET_PROGRAMS) ns.tprint(`    - ${p}`);
 
-    const hasRedPill = installedAugs.includes("The Red Pill");
+  while (true) {
+    let remaining = 0;
 
-    // Requirements (first-time Daedalus invite)
-    const hackingReqMet = hacking >= 2500;
-    const moneyReqMet   = moneyTotal >= 1e11;  // 100b lifetime earned
-    const augReqMet     = augCount >= 30;      // must have 30 installed (pre-SF)
+    for (const prog of TARGET_PROGRAMS) {
+      // Already owned? Skip.
+      if (ns.fileExists(prog, "home")) continue;
 
-    const allReqsMet = hackingReqMet && moneyReqMet && augReqMet;
+      remaining++;
 
-    ns.tprint("=== Daedalus Invite Diagnostic (BN1-Safe) ===");
-    ns.tprint(`BitNode:              BN${p.bitNodeN}`);
-    ns.tprint(`Current Factions:     ${factions.join(", ") || "(none)"}`);
-    ns.tprint("---------------------------------------------");
-    ns.tprint(`Hacking level:        ${hacking} / 2500   → ${hackingReqMet ? "OK" : "MISSING"}`);
-    ns.tprint(`Lifetime money:       ${moneyTotal.toExponential(3)} / 1e11  → ${moneyReqMet ? "OK" : "MISSING"}`);
-    ns.tprint(`Installed Augs:       ${augCount} / 30   → ${augReqMet ? "OK" : "MISSING"}`);
-    ns.tprint("---------------------------------------------");
-    ns.tprint(`Already in Daedalus?  ${hasDaedalusFaction ? "YES" : "NO"}`);
-    ns.tprint(`Has Red Pill?         ${hasRedPill ? "YES" : "NO (expected)"}`);
-    ns.tprint("---------------------------------------------");
-    ns.tprint(`All Invite Reqs Met?  ${allReqsMet ? "YES ✔" : "NO ✘"}`);
+      const cost = ns.getDarkwebProgramCost(prog);
+      if (!isFinite(cost) || cost <= 0) {
+        ns.print(`⚠️ ${prog}: cost is ${cost}, maybe not available yet? Skipping for now.`);
+        continue;
+      }
 
-    if (hasDaedalusFaction) {
-        ns.tprint("\n📌 You are already a member of Daedalus.");
-        ns.tprint("   Earn 100k rep to buy The Red Pill.");
-    } else if (allReqsMet) {
-        ns.tprint("\n🚀 All requirements are met.");
-        ns.tprint("   Invitation should appear within seconds.");
-    } else {
-        ns.tprint("\n🛠 Still missing requirements:");
-        if (!hackingReqMet) ns.tprint(`   - Hacking too low (${hacking}/2500).`);
-        if (!moneyReqMet)   ns.tprint(`   - Lifetime money too low (${moneyTotal.toExponential(3)}/1e11).`);
-        if (!augReqMet)     ns.tprint(`   - Need 30 installed augs (${augCount}/30).`);
+      const money = ns.getServerMoneyAvailable("home");
+
+      if (money >= cost) {
+        ns.tprint(
+          `🛒 Attempting to purchase ${prog} for ${ns.nFormat(cost, "$0.00a")} (you: ${ns.nFormat(money, "$0.00a")})`
+        );
+        const ok = ns.purchaseProgram(prog);
+        if (ok) {
+          ns.tprint(`✅ Purchased ${prog}.`);
+        } else {
+          ns.tprint(`❌ purchaseProgram(${prog}) failed (maybe already owned or some other issue).`);
+        }
+      } else {
+        ns.print(
+          `💤 Waiting for funds for ${prog}: ` +
+          `${ns.nFormat(money, "$0.00a")} / ${ns.nFormat(cost, "$0.00a")}`
+        );
+      }
     }
 
-    ns.tprint("=============================================");
-}
+    if (remaining === 0) {
+      ns.tprint("🎉 darkweb-auto-buyer: All target programs purchased. Exiting.");
+      return;
+    }
 
+    // Wait a bit before checking again
+    await ns.sleep(CHECK_INTERVAL);
+  }
+}
 ```
+
+--- 
+
