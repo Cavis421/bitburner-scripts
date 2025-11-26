@@ -6125,3 +6125,66 @@ export async function main(ns) {
 ```
 
 ---
+
+## daedalus-diag.js
+> Checks to see where I am compared to Daedalus invite
+
+```js
+/** @param {NS} ns **/
+export async function main(ns) {
+    ns.disableLog("ALL");
+
+    const p = ns.getPlayer();
+
+    // --- SAFE FIELDS (No Source-Files Required) ---
+    const hacking = p.hacking;
+
+    // totalMoneyEarned is available without any SF
+    const moneyTotal = p.totalMoneyEarned ?? 0;
+
+    // getOwnedAugmentations() without arguments returns ONLY installed augs
+    const installedAugs = ns.getOwnedAugmentations();
+    const augCount = installedAugs.length;
+
+    const factions = p.factions;
+    const hasDaedalusFaction = factions.includes("Daedalus");
+
+    const hasRedPill = installedAugs.includes("The Red Pill");
+
+    // Requirements (first-time Daedalus invite)
+    const hackingReqMet = hacking >= 2500;
+    const moneyReqMet   = moneyTotal >= 1e11;  // 100b lifetime earned
+    const augReqMet     = augCount >= 30;      // must have 30 installed (pre-SF)
+
+    const allReqsMet = hackingReqMet && moneyReqMet && augReqMet;
+
+    ns.tprint("=== Daedalus Invite Diagnostic (BN1-Safe) ===");
+    ns.tprint(`BitNode:              BN${p.bitNodeN}`);
+    ns.tprint(`Current Factions:     ${factions.join(", ") || "(none)"}`);
+    ns.tprint("---------------------------------------------");
+    ns.tprint(`Hacking level:        ${hacking} / 2500   → ${hackingReqMet ? "OK" : "MISSING"}`);
+    ns.tprint(`Lifetime money:       ${moneyTotal.toExponential(3)} / 1e11  → ${moneyReqMet ? "OK" : "MISSING"}`);
+    ns.tprint(`Installed Augs:       ${augCount} / 30   → ${augReqMet ? "OK" : "MISSING"}`);
+    ns.tprint("---------------------------------------------");
+    ns.tprint(`Already in Daedalus?  ${hasDaedalusFaction ? "YES" : "NO"}`);
+    ns.tprint(`Has Red Pill?         ${hasRedPill ? "YES" : "NO (expected)"}`);
+    ns.tprint("---------------------------------------------");
+    ns.tprint(`All Invite Reqs Met?  ${allReqsMet ? "YES ✔" : "NO ✘"}`);
+
+    if (hasDaedalusFaction) {
+        ns.tprint("\n📌 You are already a member of Daedalus.");
+        ns.tprint("   Earn 100k rep to buy The Red Pill.");
+    } else if (allReqsMet) {
+        ns.tprint("\n🚀 All requirements are met.");
+        ns.tprint("   Invitation should appear within seconds.");
+    } else {
+        ns.tprint("\n🛠 Still missing requirements:");
+        if (!hackingReqMet) ns.tprint(`   - Hacking too low (${hacking}/2500).`);
+        if (!moneyReqMet)   ns.tprint(`   - Lifetime money too low (${moneyTotal.toExponential(3)}/1e11).`);
+        if (!augReqMet)     ns.tprint(`   - Need 30 installed augs (${augCount}/30).`);
+    }
+
+    ns.tprint("=============================================");
+}
+
+```
