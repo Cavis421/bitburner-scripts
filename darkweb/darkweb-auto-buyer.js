@@ -19,6 +19,18 @@
 export async function main(ns) {
   ns.disableLog("ALL");
 
+  // ─────────────────────────────────────────────────────────────
+  // Singularity API check (BN4 / SF4 required)
+  // ─────────────────────────────────────────────────────────────
+  if (!ns.singularity ||
+      typeof ns.singularity.getDarkwebProgramCost !== "function" ||
+      typeof ns.singularity.purchaseProgram !== "function") {
+    ns.tprint("?? darkweb-auto-buyer: Singularity API not available.");
+    ns.tprint("   This script requires BN4 or Source-File 4.1+.");
+    ns.tprint("   Until then, buy DarkWeb programs manually with `buy` in Terminal.");
+    return;
+  }
+
   // Programs actually used in core/startup-home-advanced.js
   // (via countPortCrackers() and hasFormulas()).
   const TARGET_PROGRAMS = [
@@ -37,7 +49,7 @@ export async function main(ns) {
   const hasTor = player.tor || ns.serverExists("darkweb");
 
   if (!hasTor) {
-    ns.tprint("? darkweb-auto-buyer: No TOR router detected.");
+    ns.tprint("?? darkweb-auto-buyer: No TOR router detected.");
     ns.tprint("   Buy TOR from the DarkWeb hardware vendor first, then rerun this.");
     return;
   }
@@ -55,7 +67,7 @@ export async function main(ns) {
 
       remaining++;
 
-      const cost = ns.getDarkwebProgramCost(prog);
+      const cost = ns.singularity.getDarkwebProgramCost(prog);
       if (!isFinite(cost) || cost <= 0) {
         ns.print(`?? ${prog}: cost is ${cost}, maybe not available yet? Skipping for now.`);
         continue;
@@ -65,9 +77,10 @@ export async function main(ns) {
 
       if (money >= cost) {
         ns.tprint(
-          `?? Attempting to purchase ${prog} for ${ns.nFormat(cost, "$0.00a")} (you: ${ns.nFormat(money, "$0.00a")})`
+          `?? Attempting to purchase ${prog} for ${ns.nFormat(cost, "$0.00a")} ` +
+          `(you: ${ns.nFormat(money, "$0.00a")})`
         );
-        const ok = ns.purchaseProgram(prog);
+        const ok = ns.singularity.purchaseProgram(prog);
         if (ok) {
           ns.tprint(`? Purchased ${prog}.`);
         } else {

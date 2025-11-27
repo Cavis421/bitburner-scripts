@@ -137,13 +137,13 @@ function getScoredServers(ns, extraExcluded = []) {
     // Slight penalties / modifiers
     const secPenalty = 1 + (minSec - 1) / 100; // very gentle
 
-    // Hack level band preference: targets ~20�80% of your level are "ideal"
+    // Hack level band preference: targets ~20�80% of your level are "ideal"
     let bandBonus;
     if (hackRatio < 0.2)      bandBonus = 0.7;  // too easy: slight penalty
     else if (hackRatio <= 0.8) bandBonus = 1.0; // sweet spot
     else                       bandBonus = 0.85; // slightly above level: small penalty
 
-    // Chance modifier: 0.5�1.0 range
+    // Chance modifier: 0.5�1.0 range
     const chanceModifier = 0.5 + 0.5 * clamp(chance, 0, 1);
 
     const score = (moneyPerSec * bandBonus * chanceModifier) / secPenalty;
@@ -238,7 +238,7 @@ function getXpScoredServers(ns, extraExcluded = []) {
     const reqHack  = s.requiredHackingSkill;
     const reqPorts = s.numOpenPortsRequired ?? ns.getServerNumPortsRequired(host);
 
-    // Capability checks � must be hackable/rootable
+    // Capability checks � must be hackable/rootable
     if (reqHack > hackingLevel) continue;
     if (reqPorts > portCrackers) continue;
 
@@ -249,7 +249,7 @@ function getXpScoredServers(ns, extraExcluded = []) {
 
     // XP sweet spot:
     //  - below ~40% of your level = too easy ? penalty
-    //  - ~40%�120% of your level = sweet band
+    //  - ~40%�120% of your level = sweet band
     //  - way above = small penalty (still sometimes okay)
     let bandBonus;
     if (hackRatio < 0.4)       bandBonus = 0.5;  // way too easy
@@ -259,7 +259,7 @@ function getXpScoredServers(ns, extraExcluded = []) {
 
     // XP per second is roughly "difficulty-ish" * success rate / time.
     // Approximate difficulty with reqHack, and reward fast hack times by / tHack^1.2
-    const chanceModifier = 0.5 + 0.5 * clamp(chance, 0, 1); // 0.5�1.0
+    const chanceModifier = 0.5 + 0.5 * clamp(chance, 0, 1); // 0.5�1.0
     const baseXpScore    = (reqHack * chanceModifier) / Math.pow(tHack, 1.2);
 
     const score = baseXpScore * bandBonus;
@@ -333,9 +333,9 @@ function chooseSecondaryTarget(ns, primary) {
   return best.host;
 }
 
-// ------------------------------------------------
-// MAIN
-// ------------------------------------------------
+// ────────────────────────────────────────────────
+// MAIN (RAM-aware, prioritized launcher)
+// ────────────────────────────────────────────────
 
 export async function main(ns) {
   ns.disableLog("ALL");
@@ -343,21 +343,26 @@ export async function main(ns) {
   const formulasAvailable = hasFormulas(ns);
   ns.tprint(
     formulasAvailable
-      ? "?? Formulas.exe detected � using formulas-based times/chance where possible."
-      : "?? Formulas.exe not detected � using built-in timing/scoring APIs."
+      ? "ℹ️ Formulas.exe detected — using formulas-based times/chance where possible."
+      : "ℹ️ Formulas.exe not detected — using built-in timing/scoring APIs."
   );
 
-  // Parse flags *inside* main
+  // Flags: which HGW mode to use (xp | money)
   const flags = ns.flags([
-    ["hgw", "xp"],   // xp | money
+    ["hgw", "xp"],
   ]);
 
   const hgwMode = String(flags.hgw ?? "xp").toLowerCase();
 
-  const HOME_RAM_RESERVE = 32;   // Leave a bit free for ad-hoc scripts
+  // Dynamic home RAM reserve: 10% of home, min 8GB, max 128GB
+  const HOME_RAM_RESERVE = (() => {
+    const max = ns.getServerMaxRam("home");
+    return Math.min(128, Math.max(8, Math.floor(max * 0.10)));
+  })();
+
   const PSERV_TARGET_RAM = 2048; // GB per purchased server (tweak as you upgrade)
 
-  // flags._ contains positional args after flags
+  // Positional argument: optional batch target override
   const override = flags._[0] || null;
 
   let batchTarget;
@@ -365,76 +370,192 @@ export async function main(ns) {
 
   if (override) {
     batchTarget = override;
-    ns.tprint(`?? STARTUP-HOME: Manual override batch target: ${batchTarget}`);
+    ns.tprint(`🎯 STARTUP-HOME: Manual override batch target: ${batchTarget}`);
   } else {
     const { target: autoTarget } = choosePrimaryTarget(ns);
     batchTarget = autoTarget || "n00dles";
-    ns.tprint(`?? STARTUP-HOME: Auto-selected batch target: ${batchTarget}`);
+    ns.tprint(`🎯 STARTUP-HOME: Auto-selected batch target: ${batchTarget}`);
   }
 
-  // Pick HGW target based on flag
+  // Choose HGW target (XP or money), *distinct* from batch target when possible
   if (hgwMode === "money") {
-    ns.tprint("?? HGW Mode: MONEY");
+    ns.tprint("💰 HGW Mode: MONEY");
     hgwTarget = chooseSecondaryTarget(ns, batchTarget);
   } else {
-    ns.tprint("?? HGW Mode: XP");
+    ns.tprint("🧠 HGW Mode: XP");
     hgwTarget = chooseXpTarget(ns, batchTarget);
   }
 
-  ns.tprint(`?? BATCH TARGET (money):      ${batchTarget}`);
-  ns.tprint(`?? HGW TARGET (${hgwMode.toUpperCase()}): ${hgwTarget}`);
+  ns.tprint(`🎯 BATCH TARGET (money):      ${batchTarget}`);
+  ns.tprint(`🎯 HGW TARGET (${hgwMode.toUpperCase()}): ${hgwTarget}`);
 
-  ns.tprint("?? STARTUP-HOME: Killing all processes on home...");
-
+  // Kill everything on home except this script
+  ns.tprint("🏠 STARTUP-HOME: Killing all processes on home...");
   const myPid = ns.pid;
   const processes = ns.ps("home");
-
   for (const p of processes) {
     if (p.pid === myPid) continue;
     ns.kill(p.pid);
   }
-
   await ns.sleep(200); // allow cleanup
+  ns.tprint("✔️ Home is clean. Relaunching core automation...");
 
-  ns.tprint("?? Home is clean. Relaunching core automation...");
+  // --------------------------------------------------
+  // RAM-aware scheduler
+  // --------------------------------------------------
 
-  function safeExec(script, threads = 1, ...args) {
+  // Helper: calculate RAM cost for a script@threads (or Infinity if missing)
+  function cost(script, threads = 1) {
     if (!ns.fileExists(script, "home")) {
-      ns.tprint(`?? Missing script: ${script}`);
-      return;
+      ns.tprint(`⚠️ Missing script (skipping in plan): ${script}`);
+      return Infinity;
+    }
+    return ns.getScriptRam(script, "home") * threads;
+  }
+
+  const maxRam = ns.getServerMaxRam("home");
+  const budget  = maxRam - HOME_RAM_RESERVE; // total RAM we’re willing to spend
+  let usedPlanned = ns.getServerUsedRam("home"); // starts with just this script
+
+  // Describe everything we *might* want to launch.
+  // priority: lower number = higher priority.
+  // required: if true and it alone can’t fit, we still try once (so you see it fail clearly).
+  const plan = [
+    // 1) MONEY STACK (home + pservs) — top priority
+    {
+      name: "core/timed-net-batcher2.js",
+      threads: 1,
+      args: [batchTarget],
+      priority: 1,
+      required: true,   // if this can’t fit, you basically have no automation
+      label: "MONEY BATCHER",
+    },
+    {
+      name: "pserv/pserv-manager.js",
+      threads: 1,
+      args: [PSERV_TARGET_RAM],
+      priority: 1,
+      required: false,
+      label: "PSERV MANAGER",
+    },
+
+    // 2) BOTNET (NPC-only HGW on XP or money target)
+    {
+      name: "botnet/botnet-hgw-sync.js",
+      threads: 1,
+      args: [hgwTarget, hgwMode],
+      priority: 2,
+      required: false,
+      label: "BOTNET HGW",
+    },
+
+    // 3) ROOTING + DARKWEB utilities
+    {
+      name: "core/root-and-deploy.js",
+      threads: 1,
+      args: [batchTarget],
+      priority: 3,
+      required: false,
+      label: "ROOT-AND-DEPLOY",
+    },
+    {
+      name: "darkweb/darkweb-auto-buyer.js",
+      threads: 1,
+      args: [],
+      priority: 4,
+      required: false,
+      label: "DARKWEB BUYER",
+    },
+
+    // 4) Status / visibility
+    {
+      name: "hacknet/hacknet-status.js",
+      threads: 1,
+      args: [],
+      priority: 5,
+      required: false,
+      label: "HACKNET STATUS",
+    },
+    // Optional dashboard:
+    // {
+    //   name: "ui/ops-dashboard.js",
+    //   threads: 1,
+    //   args: [batchTarget],
+    //   priority: 6,
+    //   required: false,
+    //   label: "OPS DASHBOARD",
+    // },
+  ];
+
+  // Sort by priority (then by label just to stabilize)
+  plan.sort((a, b) => a.priority - b.priority || a.label.localeCompare(b.label));
+
+  for (const job of plan) {
+    const ramCost = cost(job.name, job.threads);
+    if (!isFinite(ramCost)) continue; // missing script, already warned
+
+    const futureUsed = usedPlanned + ramCost;
+
+    // If this is a required job and *nothing else* has been scheduled,
+    // try to launch it anyway (even if it breaks the budget) so you see the failure.
+    if (job.required && usedPlanned === ns.getServerUsedRam("home")) {
+      // Check absolute max
+      if (ramCost > maxRam) {
+        ns.tprint(
+          `❌ [REQUIRED] ${job.label}: script alone (${ramCost.toFixed(
+            1,
+          )}GB) exceeds home RAM (${maxRam.toFixed(1)}GB).`,
+        );
+        continue;
+      }
+      // Launch even if over "budget" (we'll just dip into the reserve).
+      const pid = ns.exec(job.name, "home", job.threads, ...job.args);
+      if (pid === 0) {
+        ns.tprint(`❌ [REQUIRED] Failed to launch ${job.label} (${job.name}).`);
+      } else {
+        usedPlanned = ns.getServerUsedRam("home"); // refresh from real usage
+        const argInfo = job.args.length ? ` ${JSON.stringify(job.args)}` : "";
+        ns.tprint(`🚨 Started REQUIRED ${job.label} (pid ${pid})${argInfo}`);
+      }
+      continue;
     }
 
-    const ramCost = ns.getScriptRam(script, "home") * threads;
-    const used    = ns.getServerUsedRam("home");
-    const max     = ns.getServerMaxRam("home");
-    const free    = max - used - HOME_RAM_RESERVE;
-
-    if (ramCost > free) {
-      ns.tprint(`? Not enough RAM to start ${script} (${threads} threads)`);
-      return;
+    // Normal case: respect RAM budget
+    if (futureUsed > budget) {
+      ns.tprint(
+        `❌ Skipping ${job.label} (${job.name}) — would exceed budget ` +
+          `${futureUsed.toFixed(1)}GB > ${budget.toFixed(1)}GB`,
+      );
+      continue;
     }
 
-    const pid = ns.exec(script, "home", threads, ...args);
+    const pid = ns.exec(job.name, "home", job.threads, ...job.args);
     if (pid === 0) {
-      ns.tprint(`? Failed to launch ${script}`);
+      ns.tprint(`❌ Failed to launch ${job.label} (${job.name}).`);
     } else {
-      const argInfo = args.length ? ` ${JSON.stringify(args)}` : "";
-      ns.tprint(`?? Started ${script} (pid ${pid})${argInfo}`);
+      usedPlanned = ns.getServerUsedRam("home"); // sync actual
+      const argInfo = job.args.length ? ` ${JSON.stringify(job.args)}` : "";
+      ns.tprint(`▶️ Started ${job.label} (pid ${pid})${argInfo}`);
     }
   }
 
-  // Core stack
-  safeExec("darkweb/darkweb-auto-buyer.js");
-  safeExec("pserv/pserv-manager.js",       1, PSERV_TARGET_RAM);
-  safeExec("core/timed-net-batcher2.js",  1, batchTarget); // money target
-  safeExec("core/root-and-deploy.js",     1, batchTarget);
-  safeExec("botnet/botnet-hgw-sync.js",     1, hgwTarget, hgwMode);   // XP or money target
-  // safeExec("hacknet/hacknet-smart.js",    1);
-  await ns.sleep(3000);
-  // Status / visibility
-  safeExec("botnet/botnet-hgw-status.js",   1);
-  safeExec("hacknet/hacknet-status.js",      1);
-  // safeExec("ui/ops-dashboard.js",    1, batchTarget); // optional one-shot
+    // Give botnet-hgw-sync time to deploy HGW scripts before showing status
+  await ns.sleep(5000);
 
-  ns.tprint("?? STARTUP-HOME COMPLETE � full automation online.");
+  if (ns.fileExists("botnet/botnet-hgw-status.js", "home")) {
+    const pid = ns.exec("botnet/botnet-hgw-status.js", "home", 1);
+    if (pid === 0) {
+      ns.tprint("❌ Failed to launch BOTNET STATUS after deployment delay.");
+    } else {
+      ns.tprint(`▶️ Started BOTNET STATUS (pid ${pid}) after deployment delay.`);
+    }
+  } else {
+    ns.tprint("⚠️ BOTNET STATUS script not found on home.");
+  }
+
+  ns.tprint(
+    `🎉 STARTUP-HOME COMPLETE — automation online. ` +
+      `Home RAM: ${maxRam.toFixed(1)}GB, reserve: ${HOME_RAM_RESERVE.toFixed(1)}GB.`,
+  );
 }
+

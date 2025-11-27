@@ -3,6 +3,16 @@ const MONEY_THRESHOLD = 0.99;  // At least 99% of max money
 const SEC_TOLERANCE   = 0.25;  // Security must be <= minSec + 0.25
 
 // ------------------------------------------------
+// Home RAM reserve helper (shared by both modes)
+// ------------------------------------------------
+
+function getHomeReserve(ns) {
+    const max = ns.getServerMaxRam("home");
+    // 10% of home, clamped between 8GB and 128GB
+    return Math.min(128, Math.max(8, Math.floor(max * 0.10)));
+}
+
+// ------------------------------------------------
 // Formulas.exe helpers
 // ------------------------------------------------
 
@@ -80,6 +90,7 @@ export async function main(ns) {
         return;
     }
 
+    // Make sure pservs have the batch scripts
     for (const host of purchased) {
         await ns.scp([hackScript, growScript, weakenScript], host);
     }
@@ -91,7 +102,7 @@ export async function main(ns) {
     ns.tprint(
         usingFormulas
             ? "?? Using Formulas.exe for batch timing."
-            : "?? Formulas.exe not detected � using ns.getHack/Grow/WeakenTime."
+            : "?? Formulas.exe not detected – using ns.getHack/Grow/WeakenTime."
     );
 
     // -- Timing setup -------------------------------------
@@ -122,7 +133,7 @@ export async function main(ns) {
     const growRam   = ns.getScriptRam(growScript);
     const weakenRam = ns.getScriptRam(weakenScript);
 
-    const HOME_RAM_RESERVE = 256;     // GB kept free on home
+    const HOME_RAM_RESERVE = getHomeReserve(ns);
     const MAX_HACK_FRACTION = 0.90;   // <= 90% of money in one wave
     const STATUS_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
@@ -173,23 +184,31 @@ export async function main(ns) {
             continue;
         }
 
-        // -- Scale threads with hybrid constraints ---------
-        const {
-            hackThreads,
-            growThreads,
-            weaken1Threads,
-            weaken2Threads
-        } = scaleHybridBatch(
-            ns,
-            target,
-            basePlan,
-            homeFree,
-            totalPservFree,
-            hackRam,
-            growRam,
-            weakenRam,
-            MAX_HACK_FRACTION
-        );
+// -- Scale threads with hybrid constraints ---------
+const {
+    hackThreads,
+    growThreads,
+    weaken1Threads,
+    weaken2Threads
+} = scaleHybridBatch(
+    ns,
+    target,
+    basePlan,
+    homeFree,
+    totalPservFree,
+    hackRam,
+    growRam,
+    weakenRam,
+    MAX_HACK_FRACTION
+);
+
+// If we can't even support 1 safe hack thread, bail for this tick
+if (hackThreads <= 0 || growThreads <= 0 || weaken1Threads <= 0 || weaken2Threads <= 0) {
+    ns.print("?? Not enough effective RAM (home or pservs) for even a tiny hybrid batch. Retrying...");
+    await ns.sleep(batchInterval);
+    continue;
+}
+
 
         const ramHackHome =
             hackThreads * hackRam;
@@ -226,20 +245,20 @@ export async function main(ns) {
             freeRam: Math.max(0, ns.getServerMaxRam(h.host) - ns.getServerUsedRam(h.host))
         })).filter(h => h.freeRam > 0));
 
-        // Landing order: W1 ? H ? G ? W2
+        // Landing order: W1 → H → G → W2
         const { tHack: tHackCurrent, tGrow: tGrowCurrent, tWeaken: tWeakenCurrent } = getHackGrowWeakenTimes(ns, target);
 
         const GAP2 = 200;
         const T2 = tWeakenCurrent + 4 * GAP2;
         const delayHack2  = Math.max(0, T2 - 3 * GAP2 - tHackCurrent);
         const delayGrow2  = Math.max(0, T2 - 2 * GAP2 - tGrowCurrent);
-        const delayWeak1  = Math.max(0, T2 - 1 * GAP2 - tWeakenCurrent);
-        const delayWeak2  = Math.max(0, T2          - tWeakenCurrent);
+        const delayWeak1b = Math.max(0, T2 - 1 * GAP2 - tWeakenCurrent);
+        const delayWeak2b = Math.max(0, T2          - tWeakenCurrent);
 
-        allocToHosts(ns, pservHostObjs, weakenScript, target, weaken1Threads, delayWeak1);
+        allocToHosts(ns, pservHostObjs, weakenScript, target, weaken1Threads, delayWeak1b);
         allocToHosts(ns, [homeHost],    hackScript,   target, hackThreads,    delayHack2, tHackCurrent);
         allocToHosts(ns, pservHostObjs, growScript,   target, growThreads,    delayGrow2);
-        allocToHosts(ns, pservHostObjs, weakenScript, target, weaken2Threads, delayWeak2);
+        allocToHosts(ns, pservHostObjs, weakenScript, target, weaken2Threads, delayWeak2b);
 
         await ns.sleep(batchInterval);
     }
@@ -250,7 +269,7 @@ export async function main(ns) {
 // ------------------------------------------------
 
 function calcBaseThreads(ns, target) {
-    const hackPercentTarget    = 0.05; // 5% per "unit" batch (scaled later)
+    const hackPercentTarget    = 0.02; // 2% per "unit" batch (scaled later)
     const hackPercentPerThread = ns.hackAnalyze(target);
     if (hackPercentPerThread <= 0) return null;
 
@@ -281,6 +300,10 @@ function calcBaseThreads(ns, target) {
 /* HYBRID SCALING: home = hack, pservs = grow+weaken */
 // ------------------------------------------------
 
+// ------------------------------------------------
+/* HYBRID SCALING: home = hack, pservs = grow+weaken */
+// ------------------------------------------------
+
 function scaleHybridBatch(
     ns,
     target,
@@ -294,36 +317,67 @@ function scaleHybridBatch(
 ) {
     const { baseHack, baseGrow, baseWeak } = base;
 
-    const ramHackUnit = baseHack * hackRam;
-    const ramGWUnit =
-        baseGrow * growRam +
-        (2 * baseWeak) * weakenRam;
+    // Derive ratios per 1 hack thread from the base plan
+    // (this keeps grow/weaken balanced to the hack size)
+    const growPerHack  = baseGrow / baseHack;
+    const weakPerHack  = baseWeak / baseHack;
 
-    let multHome  = Math.floor(homeFreeRam       / ramHackUnit);
-    let multPserv = Math.floor(totalPservFreeRam / ramGWUnit);
+    // RAM cost per *hack thread* worth of support:
+    const ramPerHackOnHome   = hackRam;
+    const ramPerHackOnPservs =
+        growPerHack * growRam +
+        2 * weakPerHack * weakenRam; // grow + two weakens (W1/W2)
 
-    if (multHome < 1)  multHome  = 1;
-    if (multPserv < 1) multPserv = 1;
-
-    // Hack safety: never steal more than MAX_HACK_FRACTION per wave
-    const pctPerHackThread = ns.hackAnalyze(target);
-    const basePct          = baseHack * pctPerHackThread;
-
-    let safeMult = multHome;
-    if (basePct > 0) {
-        const m = Math.floor(MAX_HACK_FRACTION / basePct);
-        if (m > 0) safeMult = Math.min(safeMult, m);
+    // If we literally can't support even 1 hack thread's worth of support, bail
+    if (homeFreeRam < ramPerHackOnHome || totalPservFreeRam < ramPerHackOnPservs) {
+        return { hackThreads: 0, growThreads: 0, weaken1Threads: 0, weaken2Threads: 0 };
     }
 
-    const mult = Math.max(1, Math.min(multHome, multPserv, safeMult));
+    // Limits from RAM
+    const maxHackByHome  = Math.floor(homeFreeRam       / ramPerHackOnHome);
+    const maxHackByPserv = Math.floor(totalPservFreeRam / ramPerHackOnPservs);
 
-    const hackThreads    = Math.max(1, baseHack * mult);
-    const growThreads    = Math.max(1, baseGrow * mult);
-    const weaken1Threads = Math.max(1, baseWeak * mult);
-    const weaken2Threads = Math.max(1, baseWeak * mult);
+    // Limit from money safety (don't over-hack)
+    let maxHackBySafety = Infinity;
+    const pctPerHackThread = ns.hackAnalyze(target);
+    if (pctPerHackThread > 0) {
+        maxHackBySafety = Math.floor(MAX_HACK_FRACTION / pctPerHackThread);
+    }
+
+    let hackThreads = Math.min(maxHackByHome, maxHackByPserv, maxHackBySafety);
+    if (!Number.isFinite(hackThreads) || hackThreads <= 0) {
+        return { hackThreads: 0, growThreads: 0, weaken1Threads: 0, weaken2Threads: 0 };
+    }
+
+    // Round down a bit to be safe
+    hackThreads = Math.max(1, Math.floor(hackThreads));
+
+    // Scale grow/weaken proportionally to hack threads
+    let growThreads    = Math.max(1, Math.round(hackThreads * growPerHack));
+    let weaken1Threads = Math.max(1, Math.round(hackThreads * weakPerHack));
+    let weaken2Threads = Math.max(1, weaken1Threads);
+
+    // Final sanity check: if after rounding we no longer fit, step down once
+    const totalRamHomeNeeded   = hackThreads * hackRam;
+    const totalRamPservsNeeded =
+        growThreads * growRam +
+        (weaken1Threads + weaken2Threads) * weakenRam;
+
+    if (totalRamHomeNeeded > homeFreeRam || totalRamPservsNeeded > totalPservFreeRam) {
+        // Try dropping hackThreads by one step and recompute
+        hackThreads = Math.max(0, hackThreads - 1);
+        if (hackThreads <= 0) {
+            return { hackThreads: 0, growThreads: 0, weaken1Threads: 0, weaken2Threads: 0 };
+        }
+
+        growThreads    = Math.max(1, Math.round(hackThreads * growPerHack));
+        weaken1Threads = Math.max(1, Math.round(hackThreads * weakPerHack));
+        weaken2Threads = Math.max(1, weaken1Threads);
+    }
 
     return { hackThreads, growThreads, weaken1Threads, weaken2Threads };
 }
+
 
 // ------------------------------------------------
 // GENERIC ALLOCATION ACROSS HOSTS
@@ -371,9 +425,9 @@ function printTargetStatus(ns, target) {
     const ts = now.toLocaleTimeString();
 
     ns.print("--------------------------------------");
-    ns.print(`?? TARGET STATUS � ${target} @ ${ts}`);
+    ns.print(`?? TARGET STATUS – ${target} @ ${ts}`);
     ns.print(`?? Money:       ${ns.nFormat(money, "$0.00a")} / ${ns.nFormat(max, "$0.00a")} (${moneyPct.toFixed(2)}%)`);
-    ns.print(`?? Security:     ${sec.toFixed(2)} (min ${minSec.toFixed(2)})  ?=${secDelta.toFixed(2)}`);
+    ns.print(`?? Security:     ${sec.toFixed(2)} (min ${minSec.toFixed(2)})  Δ=${secDelta.toFixed(2)}`);
     ns.print("--------------------------------------");
 }
 
@@ -525,7 +579,7 @@ async function ensurePrepped(
 
         ns.print(
             `?? Prep wave: G=${growThreads}, W=${weakenThreads} ` +
-            `(RAM�${totalRamNeeded.toFixed(1)}GB, duration�${ns.tFormat(T)})`
+            `(RAM≈${totalRamNeeded.toFixed(1)}GB, duration≈${ns.tFormat(T)})`
         );
 
         if (growThreads > 0) {
@@ -582,7 +636,7 @@ async function runAllOnHome(ns, target, hackScript, growScript, weakenScript) {
     const minRamNeeded =
         hackRam + growRam + (2 * weakenRam);
 
-    const HOME_RAM_RESERVE = 256;
+    const HOME_RAM_RESERVE = getHomeReserve(ns);
     const MAX_HACK_FRACTION = 0.90;
 
     while (true) {
