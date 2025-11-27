@@ -10,6 +10,9 @@
 # Do not commit filesync config or Netscript definitions
 filesync.json
 NetscriptDefinitions.d.ts
+settings.json
+Bitburner_Master_Codebase_v2.md 
+Bitburner_Master_Codebase_v3.md
 
 # If using the deprecated VSCode extension:
 # .bitburner/ holds auth tokens & local config
