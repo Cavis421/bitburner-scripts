@@ -1,217 +1,237 @@
-# 📘 Bitburner Scripts — Automated, Modular, Full-Stack Botnet Framework
+# ⚡ Bitburner Scripts — Modular, Automated, Endgame-Ready Framework
 
-This repo is a fully modular, production-grade Bitburner automation framework designed to **bootstrap**, **orchestrate**, **optimize**, and **monitor** every part of your hacking infrastructure.
+This repository contains a fully modular, production-grade automation framework for **Bitburner**.  
+It manages **startup**, **batching**, **botnet HGW**, **Hacknet automation**, **server orchestration**, and **UI dashboards** in a unified, scalable architecture.
 
-It contains:
-
-- A full **startup system**
-- A complete **botnet HGW engine** (home + pservs + NPC servers)
-- Tiered **batching systems**
-- **Hacknet fleet management**
-- XP grinding modes
-- UI dashboards and monitoring tools
-- Utilities for analysis, scanning, and target selection
-- A master codebase file for easy Netscript deployment and versioning
-
-This is intended to be a *complete endgame-ready automation suite*.
+Designed for mid–late game and BitNode resets, this framework allows you to start from a completely clean save and bootstrap to endgame automation with a single command.
 
 ---
 
 # 📁 Repository Structure
 
-Your repo now uses category-driven directories that match the structure in `Bitburner_Master_Codebase.md`:
+Your local repo is structured into clean, category-based directories:
 
-```
 bitburner-scripts/
 │
-├── startup-orchestration/      # Startup systems, orchestration, one-button deploy
-├── botnet-hgw/                 # Distributed HGW logic, swarm deployment, sync tools
-├── batch-workers/              # Hack/Grow/Weaken workers + batching components
-├── fleet-hacknet/              # Hacknet node automation & monitoring
-├── ui-monitoring/              # Dashboards, process monitoring, XP throughput UI
-├── utilities-info/             # Scanners, helpers, formulas logic, target finders
-└── Bitburner_Master_Codebase.md      # Single-file merged codebase for Netscript import
-```
+├── batch/ # HGW batch workers + timed batch controllers
+├── botnet/ # Distributed HGW engine, swarm deployment, syncing
+├── core/ # Startup, network deployment, batch controllers
+├── corp/ # Corporation automation (BN3 and beyond)
+├── darkweb/ # Dark web utilities and buyers
+├── hacknet/ # Hacknet node automation and dashboards
+├── pserv/ # Purchased server management tools
+├── ui/ # UI dashboards and monitoring tools
+├── util/ # Scanners, analysis tools, formulas helpers
+└── Bitburner_Master_Codebase.md # Flattened single-file codebase
+
+markdown
+Copy code
+
+Each folder contains scripts with a tightly defined purpose, mirroring the in-game pseudo-filesystem introduced by the refactor.
 
 ---
 
-## 📂 startup-orchestration
+## 📂 `core/` — Startup & Orchestration
 
-Scripts responsible for **bootstrapping the entire system** from a clean save.
+Contains all scripts responsible for **bootstrapping and managing** your entire hacking infrastructure.
 
-Includes:
+Key scripts:
 
-- `startup-home-advanced.js` — Your “one button starts the machine”
-- `startup-home.txt` — Documentation / template
-- `startup.txt` — Minimal bootstrap
-- Early-game helpers, backdoor assistants, etc.
+- `startup-home-advanced.js` – One-button full boot sequence  
+- `startup-home.js` – Lightweight bootstrap  
+- `early-backdoor-helper.js` – Auto-find backdoor targets  
+- `deploy-net.js` – Recursive server deployment  
+- `root-all.js` / `root-and-deploy.js` – Rooting utilities  
+- `timed-net-batcher.js` / `timed-net-batcher2.js` – Main batching controllers  
 
-These scripts:
+This subsystem performs:
 
-- Scan & root servers  
-- Deploy botnet workers  
-- Configure batching  
-- Start monitoring services  
-- Initialize Hacknet fleet automation
-
----
-
-## 📂 botnet-hgw
-
-Distributed hack–grow–weaken orchestration for **home, pservs, and NPC servers**.
-
-Includes:
-
-- `remote-hgw.js` — Core HGW worker  
-- `home-hgw-manager.js` — Home controller  
-- `pserv-hgw-sync.js` — Private server synchronizer  
-- `deploy-hgw-swarm.js` — Deploys full HGW swarm  
-- `deploy-net.js`, `root-and-deploy.js`, `root-all.js`  
-- Status and monitoring tools  
-
-This subsystem:
-
-- Balances threads across all nodes
-- Supports money mode *and* XP mode
-- Auto-detects rooted servers
-- Synchronizes workloads dynamically
+- Full network scan  
+- Auto rooting  
+- Swarm deployment  
+- Batch scheduler initialization  
+- Dashboard/UI service startup  
+- Early BitNode bootstrap  
 
 ---
 
-## 📂 batch-workers
+## 📂 `batch/` — Worker Scripts & Batch Engines
 
-Scripts directly supporting batching behavior.
+Implements the core HGW batching logic.
 
 Includes:
 
 - `batch-hack.js`, `batch-grow.js`, `batch-weaken.js`  
 - `hack-worker.js`, `grow-worker.js`, `weaken-worker.js`  
+- `timed-net-batcher.js`, `timed-net-batcher2.js`  
 - `net-hwgw-batcher.js`  
-- `timed-net-batcher.js`, `timed-net-batcher2.js`
 
-These implement:
+Features:
 
-- Balanced batching  
-- Timed netscript pipelines  
-- Worker scripts  
-- Distributed scheduling
+- Balanced worker dispatch  
+- Batching pipeline orchestration  
+- Timed gap execution  
+- Multi-host synchronized workers  
+- Support for XP and money modes  
 
 ---
 
-## 📂 fleet-hacknet
+## 📂 `botnet/` — Distributed HGW Network
 
-Automation logic for Hacknet nodes.
+Controls the distributed hacking swarm across **home**, **pservs**, and **NPC servers**.
 
 Includes:
 
-- `hacknet-smart.js` — Purchase/upgrade optimizer
-- `hacknet-manager.js` — Live ROI management
-- `hacknet-status.js` — Dashboard
-- Purchase helpers
+- `remote-hgw.js` — Remote HGW worker  
+- `home-hgw-manager.js` — Home execution orchestrator  
+- `pserv-hgw-sync.js` — Sync controller for purchased servers  
+- `botnet-hgw-sync.js`, `botnet-hgw-status.js`  
+- `deploy-hgw-swarm.js` — Deploy entire HGW network  
+- `auto-hgw.js` — Quick-start HGW dispatcher  
+
+Supports:
+
+- Thread load balancing  
+- Auto-scaling with server upgrades  
+- Dynamic target switching  
+- Swarm-wide synchronization  
+
+---
+
+## 📂 `hacknet/` — Automated Node Management
+
+Complete Hacknet fleet automation.
+
+Scripts include:
+
+- `hacknet-smart.js` — ROI-driven purchasing & upgrading  
+- `hacknet-manager.js` — Continuous optimization loop  
+- `hacknet-status.js` — Dashboard  
+- Purchase helpers  
 
 Handles:
 
-- Optimal node ordering  
-- Dynamic ROI evaluation  
-- Continuous auto-upgrading  
+- Optimal upgrade ordering  
+- Value-per-dollar analysis  
+- Full passive-income automation  
 
 ---
 
-## 📂 ui-monitoring
+## 📂 `pserv/` — Purchased Server Management
 
-Realtime UI dashboards.
+Responsible for:
 
-Includes:
+- Server purchase/upgrade  
+- Fleet summary dashboards  
+- Cleanup & recycling  
 
-- `ops-dashboard.js`
-- `process-monitor.js`
-- `xp-throughput-monitor.js`
+Key scripts:
 
-Provides:
-
-- Global operations overview  
-- Process runtime visibility  
-- XP throughput stats  
+- `pserv-manager.js`  
+- `pserv-status.js`  
+- `pserv-process-report.js`  
+- `purchase_server_8gb.js`  
+- `clean-pservs.js`  
 
 ---
 
-## 📂 utilities-info
+## 📂 `ui/` — Dashboards & Live Monitoring
 
-Utility scripts, formulas helpers, scanning, and target analysis.
+Graphical (terminal-based) monitoring tools.
 
 Includes:
 
-- `find-juicy-target.js`, `find-juicy-advanced.js`
-- `formulas-helper.js`
-- `prep-target.js`
-- `whats-my-bitNode.js`
-- `hacktemplate.txt`
-- `xp-to-next-level.js`
-- `karma-watch.js`
+- `ops-dashboard.js` — Global op status  
+- `process-monitor.js` — Live process/watchdog  
+- `xp-throughput-monitor.js` — XP/sec tracking  
+- `karma-watch.js` — Faction/karma grinding helper  
 
-These scripts assist with:
+---
+
+## 📂 `util/` — Analysis, Helpers & Scanners
+
+Utility scripts for data modeling and analysis.
+
+Includes:
+
+- `find-juicy-target.js` / `find-juicy-advanced.js`  
+- `formulas-helper.js`  
+- `prep-target.js`  
+- `xp-to-next-level.js`  
+- `whats-my-bitNode.js`  
+- `hacktemplate.txt`  
+
+Handles:
 
 - Target selection  
-- Formulas modeling  
-- Server preparation  
-- BitNode details  
-- XP progress tracking  
+- Server prep calculations  
+- Formulas.exe integration  
+- XP projections  
 
 ---
 
-# 📦 Master Codebase File
+# 📦 `Bitburner_Master_Codebase.md`
 
-`Bitburner_Master_Codebase.md` is a **single-file flattened codebase**, containing every script in this repo bundled together.
+This file is a **flattened, single-file version of the entire codebase**, used for:
 
+- Importing into in-game editor  
+- Sharing combined builds  
+- Quick copying into Bitburner  
+- Debugging Netscript execution order  
 
-
-You can:
-
-- Upload this directly into Bitburner  
-- Sync with VS Code  
-- Reconstruct the full repo structure via the organizer script  
-
-This file is the **canonical source of truth**.
+Automatic tools can reconstruct the original folder layout from this file.
 
 ---
 
+# 🚀 Running the Framework In-Game
 
-# 🚀 Usage in Bitburner
+Once synced (via filesync or manual upload):
 
-After syncing the scripts:
-
-Start full automation:
-
-```sh
-run startup-home-advanced.js
-```
-
-Start XP grinding mode:
+### Start full automation:
 
 ```sh
-run xp-all.js
-```
-
-Deploy HGW swarm:
-
-```sh
-run deploy-hgw-swarm.js
-```
-
+run core/startup-home-advanced.js
+Deploy entire HGW swarm:
+sh
+Copy code
+run botnet/deploy-hgw-swarm.js
+Begin XP grinding mode:
+sh
+Copy code
+run botnet/xp-all.js
 Root everything:
+sh
+Copy code
+run core/root-all.js
+Monitor operations:
+sh
+Copy code
+run ui/process-monitor.js
+🧪 Recommended Development Workflow
+Edit scripts locally (VS Code)
 
-```sh
-run root-all.js
-```
+Auto-sync via bitburner-filesync
 
----
+Export/update Bitburner_Master_Codebase.md when needed
 
-# 🧪 Recommended Workflow
+Launch automation using startup-home-advanced.js
 
-1. Edit scripts locally  
-2. Run organizer script  
-3. Export updated `Bitburner_Master_Codebase.md`  
-4. Sync/upload to game  
-5. Run `startup-home-advanced.js`  
-6. Use dashboards to monitor operations  
+Monitor using UI dashboards
 
+Iterate & refine
+
+🛠 Requirements
+Bitburner (Steam or browser)
+
+Remote API enabled
+
+bitburner-filesync (recommended)
+
+Node.js (for filesync & tooling)
+
+📜 License
+MIT License — free to use, modify, and distribute.
+
+🤖 Contributions / Pull Requests
+PRs and suggestions are welcome!
+If you have improvements to batching logic, HGW scheduling, Hacknet math, or server orchestration, feel free to contribute.

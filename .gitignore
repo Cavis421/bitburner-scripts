@@ -1,8 +1,51 @@
-# VS Code settings
+# ========
+# VS CODE
+# ========
 .vscode/
+*.code-workspace
 
-# OS junk
+# ========
+# Bitburner Tools
+# ========
+# Do not commit filesync config or Netscript definitions
+filesync.json
+NetscriptDefinitions.d.ts
+
+# If using the deprecated VSCode extension:
+# .bitburner/ holds auth tokens & local config
+.bitburner/
+
+# ========
+# Logs / Temp / Cache
+# ========
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+
+# ========
+# OS JUNK
+# ========
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Windows Explorer’s uploaded temp folder
 /.tmp.driveupload/
+
+# ========
+# SCRIPTS / UTILITIES
+# ========
+# Ignore PowerShell scripts if you don't want them in repo
 *.ps1
+
+# Ignore shell scripts
+*.sh
+
+# ========
+# NODE / NPM (Only if you use tooling)
+# ========
+node_modules/
+package-lock.json
+
