@@ -1,4 +1,4 @@
-//** util/find-juicy-advanced.js
+/** util/find-juicy-advanced.js
  * Advanced juicy target finder:
  *
  * - Filters out trash / too-easy / too-hard / low-money servers.
@@ -6,8 +6,9 @@
  * - Scores by money/sec and security, using Formulas.exe when available.
  * - Falls back to vanilla ns.getHackTime / ns.hackAnalyze* when Formulas.exe is missing.
  *
- * @param {NS} ns
- **/
+ * **/
+//@param {NS} ns
+ 
 export async function main(ns) {
     ns.disableLog("ALL");
 
@@ -74,7 +75,7 @@ export async function main(ns) {
 
     if (!best) {
         ns.tprint("? No juicy advanced target found with current filters.");
-        ns.tprint("   (Either you need to root more servers, or we’re still early-game.)");
+        ns.tprint("   (Either you need to root more servers, or weï¿½re still early-game.)");
         return;
     }
 
