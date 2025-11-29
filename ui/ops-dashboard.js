@@ -3,10 +3,10 @@
  *  Usage: run ui/ops-dashboard.js [optional-target-override]
  */
 
-/** Simple number formatter using nFormat (works on all versions) */
+/** Simple number formatter using ns.formatNumber (works on all versions) */
 /** @param {NS} ns */
 function fmt(ns, val, decimals = 3) {
-    return ns.nFormat(val, `0.${"0".repeat(decimals)}a`);
+    return ns.ns.formatNumber(val, `0.${"0".repeat(decimals)}a`);
 }
 
 /** Formulas.exe detection */
@@ -86,8 +86,8 @@ function printTargetTiming(ns, target) {
     if (maxMoney > 0) {
         ns.tprint(
             "   ?? Theo cap: " +
-            `Max=${ns.nFormat(maxMoney, "$0.00a")} | ` +
-            `~${ns.nFormat(moneyPerSecCap, "$0.00a")}/sec (if perfectly farmed)`
+            `Max=${ns.ns.formatNumber(maxMoney, "$0.00a")} | ` +
+            `~${ns.ns.formatNumber(moneyPerSecCap, "$0.00a")}/sec (if perfectly farmed)`
         );
     }
 

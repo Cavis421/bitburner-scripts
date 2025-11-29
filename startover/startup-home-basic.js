@@ -60,11 +60,11 @@ export async function main(ns) {
     }
 
     // Core stack
-    safeExec("pserv-manager-basic.js", 1, PSERV_TARGET_RAM);
-    safeExec("root-and-deploy-basic.js", 1, target);
+    safeExec("startover/pserv-manager-basic.js", 1, PSERV_TARGET_RAM);
+    safeExec("startover/root-and-deploy-basic.js", 1, target);
 
     // Use leftover home RAM to hack with remote-hgw-basic.js
-    const worker = "remote-hgw-basic.js";
+    const worker = "startover/remote-hgw-basic.js";
     if (!ns.fileExists(worker, "home")) {
         ns.tprint("⚠️ remote-hgw-basic.js not found on home; home will not hack.");
     } else {

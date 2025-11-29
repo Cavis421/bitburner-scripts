@@ -77,8 +77,8 @@ export async function main(ns) {
 
       if (money >= cost) {
         ns.tprint(
-          `?? Attempting to purchase ${prog} for ${ns.nFormat(cost, "$0.00a")} ` +
-          `(you: ${ns.nFormat(money, "$0.00a")})`
+          `?? Attempting to purchase ${prog} for ${ns.ns.formatNumber(cost, "$0.00a")} ` +
+          `(you: ${ns.ns.formatNumber(money, "$0.00a")})`
         );
         const ok = ns.singularity.purchaseProgram(prog);
         if (ok) {
@@ -89,7 +89,7 @@ export async function main(ns) {
       } else {
         ns.print(
           `?? Waiting for funds for ${prog}: ` +
-          `${ns.nFormat(money, "$0.00a")} / ${ns.nFormat(cost, "$0.00a")}`
+          `${ns.ns.formatNumber(money, "$0.00a")} / ${ns.ns.formatNumber(cost, "$0.00a")}`
         );
       }
     }

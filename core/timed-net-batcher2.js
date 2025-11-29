@@ -1,13 +1,21 @@
-// ⚙️ Global health thresholds (strict defaults)
-const MONEY_THRESHOLD = 0.99;  // At least 99% of max money (normal mode)
-const SEC_TOLERANCE   = 0.25;  // Security must be <= minSec + 0.25 (normal mode)
+// ⚙️ Global health thresholds (more relaxed)
+const MONEY_THRESHOLD = 0.95;  // Accept 95%+ money (normal mode)
+const SEC_TOLERANCE   = 0.5;   // Allow up to +0.5 sec above min
 
-// Softer thresholds for low-RAM mode
-const LOWRAM_MONEY_THRESHOLD = 0.95; // Accept 95%+ money
-const LOWRAM_SEC_TOLERANCE   = 1.00; // Accept up to +1.0 sec above min
+// Softer thresholds for low-RAM mode (still looser)
+const LOWRAM_MONEY_THRESHOLD = 0.90; // Accept 90%+ money
+const LOWRAM_SEC_TOLERANCE   = 1.50; // Accept up to +1.5 sec above min
+
 
 // Interval for status + profit summaries
 const STATUS_INTERVAL = 10 * 60 * 1000; // 10 minutes
+
+// Simple formatter wrapper for money values
+function fmtMoney(ns, value) {
+    // 2 decimal places, suffixes from 1k and up
+    // formatNumber(value, fractionalDigits = 2, suffixStart = 1000)
+    return "$" + ns.formatNumber(value, 2, 1e3);
+}
 
 // ------------------------------------------------
 // Home RAM reserve helper (shared by both modes)
@@ -194,7 +202,19 @@ export async function main(ns) {
         if (now - lastStatusPrint >= STATUS_INTERVAL) {
             printTargetStatus(ns, target);
 
-            // GLOBAL lifetime summary
+            // Heartbeat: always hits console, even if no batches yet
+            const runtimeMs = Date.now() - startTime;
+            const runtimeSec = runtimeMs / 1000;
+            const avgPerSecHeartbeat =
+                runtimeSec > 0 ? cumulativeBatchMoney / runtimeSec : 0;
+            const avgPerHourHeartbeat = avgPerSecHeartbeat * 3600;
+
+            ns.tprint(
+                `⏱ HEARTBEAT – ${target} | runtime=${ns.tFormat(runtimeMs)} | ` +
+                `batches=${batchCount} | est≈${fmtMoney(ns, avgPerHourHeartbeat)}/hr`
+            );
+
+            // GLOBAL lifetime summary (only if we actually launched batches)
             if (batchCount > 0) {
                 const runtimeSec = (Date.now() - startTime) / 1000;
                 const avgPerSec  = cumulativeBatchMoney / runtimeSec;
@@ -203,9 +223,9 @@ export async function main(ns) {
                 ns.tprint(
                     `📈 PROFIT SUMMARY – lifetime\n` +
                     `    batches launched:   ${batchCount}\n` +
-                    `    est money gained:   ${ns.nFormat(cumulativeBatchMoney, "$0.00a")}\n` +
-                    `    avg income:         ${ns.nFormat(avgPerSec, "$0.00a")}/sec ` +
-                    `(${ns.nFormat(avgPerHour, "$0.00a")}/hr)\n` +
+                    `    est money gained:   ${fmtMoney(ns, cumulativeBatchMoney)}\n` +
+                    `    avg income:         ${fmtMoney(ns, avgPerSec)}/sec ` +
+                    `(${fmtMoney(ns, avgPerHour)}/hr)\n` +
                     `    runtime:            ${ns.tFormat(runtimeSec * 1000)}`
                 );
             }
@@ -219,9 +239,9 @@ export async function main(ns) {
                 ns.tprint(
                     `🕒 PROFIT (last ${ns.tFormat(windowSec * 1000)}):\n` +
                     `    batches:            ${rollingBatches}\n` +
-                    `    money gained:       ${ns.nFormat(rollingMoney, "$0.00a")}\n` +
-                    `    avg income:         ${ns.nFormat(sliceAvg, "$0.00a")}/sec ` +
-                    `(${ns.nFormat(sliceHour, "$0.00a")}/hr)`
+                    `    money gained:       ${fmtMoney(ns, rollingMoney)}\n` +
+                    `    avg income:         ${fmtMoney(ns, sliceAvg)}/sec ` +
+                    `(${fmtMoney(ns, sliceHour)}/hr)`
                 );
             }
 
@@ -311,10 +331,10 @@ export async function main(ns) {
             `H=${hackThreads} (home ${ramHackHome.toFixed(1)}GB), ` +
             `G=${growThreads}, W1=${weaken1Threads}, W2=${weaken2Threads} ` +
             `(pserv RAM=${ramGWOnPservs.toFixed(1)}GB) ` +
-            `| 💰 batch≈${ns.nFormat(estBatchMoney, "$0.00a")} ` +
-            `(~${ns.nFormat(estMoneyPerSec, "$0.00a")}/sec) ` +
-            `| 📊 avg≈${ns.nFormat(avgPerSec, "$0.00a")}/sec ` +
-            `(${ns.nFormat(avgPerHour, "$0.00a")}/hr over ${batchCount} batches)`
+            `| 💰 batch≈${fmtMoney(ns, estBatchMoney)} ` +
+            `(~${fmtMoney(ns, estMoneyPerSec)}/sec) ` +
+            `| 📊 avg≈${fmtMoney(ns, avgPerSec)}/sec ` +
+            `(${fmtMoney(ns, avgPerHour)}/hr over ${batchCount} batches)`
         );
 
         // Rebuild host objects using fresh RAM before allocation
@@ -381,7 +401,7 @@ function calcBaseThreads(ns, target) {
 }
 
 // ------------------------------------------------
-/* HYBRID SCALING: home = hack, pservs = grow+weaken */
+// HYBRID SCALING: home = hack, pservs = grow+weaken
 // ------------------------------------------------
 
 function scaleHybridBatch(
@@ -502,11 +522,12 @@ function printTargetStatus(ns, target) {
     const now = new Date();
     const ts = now.toLocaleTimeString();
 
-    ns.print("--------------------------------------");
-    ns.print(`📊 TARGET STATUS – ${target} @ ${ts}`);
-    ns.print(`💰 Money:       ${ns.nFormat(money, "$0.00a")} / ${ns.nFormat(max, "$0.00a")} (${moneyPct.toFixed(2)}%)`);
-    ns.print(`🛡 Security:    ${sec.toFixed(2)} (min ${minSec.toFixed(2)})  Δ=${secDelta.toFixed(2)}`);
-    ns.print("--------------------------------------");
+    // Switched to tprint so status shows in the main terminal every interval
+    ns.tprint("--------------------------------------");
+    ns.tprint(`📊 TARGET STATUS – ${target} @ ${ts}`);
+    ns.tprint(`💰 Money:       ${fmtMoney(ns, money)} / ${fmtMoney(ns, max)} (${moneyPct.toFixed(2)}%)`);
+    ns.tprint(`🛡 Security:    ${sec.toFixed(2)} (min ${minSec.toFixed(2)})  Δ=${secDelta.toFixed(2)}`);
+    ns.tprint("--------------------------------------");
 }
 
 function shuffleArray(ns, arr) {
@@ -749,6 +770,18 @@ async function runAllOnHome(ns, target, hackScript, growScript, weakenScript, lo
         if (now - lastStatusPrint >= STATUS_INTERVAL) {
             printTargetStatus(ns, target);
 
+            // Heartbeat: always hits console, even if no batches yet
+            const runtimeMs = Date.now() - startTime;
+            const runtimeSec = runtimeMs / 1000;
+            const avgPerSecHeartbeat =
+                runtimeSec > 0 ? cumulativeBatchMoney / runtimeSec : 0;
+            const avgPerHourHeartbeat = avgPerSecHeartbeat * 3600;
+
+            ns.tprint(
+                `⏱ HEARTBEAT – ${target} [HOME-ONLY] | runtime=${ns.tFormat(runtimeMs)} | ` +
+                `batches=${batchCount} | est≈${fmtMoney(ns, avgPerHourHeartbeat)}/hr`
+            );
+
             if (batchCount > 0) {
                 const runtimeSec = (Date.now() - startTime) / 1000;
                 const avgPerSec  = cumulativeBatchMoney / runtimeSec;
@@ -757,9 +790,9 @@ async function runAllOnHome(ns, target, hackScript, growScript, weakenScript, lo
                 ns.tprint(
                     `📈 PROFIT SUMMARY – lifetime\n` +
                     `    batches launched:   ${batchCount}\n` +
-                    `    est money gained:   ${ns.nFormat(cumulativeBatchMoney, "$0.00a")}\n` +
-                    `    avg income:         ${ns.nFormat(avgPerSec, "$0.00a")}/sec ` +
-                    `(${ns.nFormat(avgPerHour, "$0.00a")}/hr)\n` +
+                    `    est money gained:   ${fmtMoney(ns, cumulativeBatchMoney)}\n` +
+                    `    avg income:         ${fmtMoney(ns, avgPerSec)}/sec ` +
+                    `(${fmtMoney(ns, avgPerHour)}/hr)\n` +
                     `    runtime:            ${ns.tFormat(runtimeSec * 1000)}`
                 );
             }
@@ -772,9 +805,9 @@ async function runAllOnHome(ns, target, hackScript, growScript, weakenScript, lo
                 ns.tprint(
                     `🕒 PROFIT (last ${ns.tFormat(windowSec * 1000)}):\n` +
                     `    batches:            ${rollingBatches}\n` +
-                    `    money gained:       ${ns.nFormat(rollingMoney, "$0.00a")}\n` +
-                    `    avg income:         ${ns.nFormat(sliceAvg, "$0.00a")}/sec ` +
-                    `(${ns.nFormat(sliceHour, "$0.00a")}/hr)`
+                    `    money gained:       ${fmtMoney(ns, rollingMoney)}\n` +
+                    `    avg income:         ${fmtMoney(ns, sliceAvg)}/sec ` +
+                    `(${fmtMoney(ns, sliceHour)}/hr)`
                 );
             }
 
@@ -844,10 +877,10 @@ async function runAllOnHome(ns, target, hackScript, growScript, weakenScript, lo
             `H=${hackThreads}, G=${growThreads}, ` +
             `W1=${weaken1Threads}, W2=${weaken2Threads} ` +
             `(RAM=${ramUsed.toFixed(1)}GB) ` +
-            `| 💰 batch≈${ns.nFormat(estBatchMoney, "$0.00a")} ` +
-            `(~${ns.nFormat(estMoneyPerSec, "$0.00a")}/sec) ` +
-            `| 📊 avg≈${ns.nFormat(avgPerSec, "$0.00a")}/sec ` +
-            `(${ns.nFormat(avgPerHour, "$0.00a")}/hr over ${batchCount} batches)`
+            `| 💰 batch≈${fmtMoney(ns, estBatchMoney)} ` +
+            `(~${fmtMoney(ns, estMoneyPerSec)}/sec) ` +
+            `| 📊 avg≈${fmtMoney(ns, avgPerSec)}/sec ` +
+            `(${fmtMoney(ns, avgPerHour)}/hr over ${batchCount} batches)`
         );
 
         const host = { host: "home", freeRam };

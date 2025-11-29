@@ -36,6 +36,12 @@ function clamp(x, min, max) {
   return Math.min(max, Math.max(min, x));
 }
 
+function fmtMoney(ns, value) {
+  // 2 decimal places, suffixes from 1k and up.
+  // Signature is: formatNumber(value, fractionalDigits = 2, suffixStart = 1000)
+  return "$" + ns.formatNumber(value, 2, 1e3);
+}
+
 // ------------------------------------------------
 // Formulas.exe helpers (auto-detect + safe fallback)
 // ------------------------------------------------
@@ -180,12 +186,12 @@ function choosePrimaryTarget(ns) {
   ns.tprint("   💰 Juiciest Advanced Target (v4: tuned money/sec)");
   ns.tprint("=======================================");
   ns.tprint(`🎯 Host:       ${best.host}`);
-  ns.tprint(`💸 Max Money:  ${ns.nFormat(best.maxMoney, "$0.00a")}`);
+  ns.tprint(`💸 Max Money:  ${fmtMoney(ns, best.maxMoney)}`);
   ns.tprint(`🧠 Req Hack:   ${best.reqHack} (you: ${ns.getHackingLevel()})`);
   ns.tprint(`🎯 Chance:     ${(best.chance * 100).toFixed(1)}%`);
   ns.tprint(`🛡 MinSec:     ${best.minSec.toFixed(2)}`);
   ns.tprint(`⏱ Hack Time:  ${(best.tHack / 1000).toFixed(1)}s`);
-  ns.tprint(`💰 Money/sec:  ${ns.nFormat(best.moneyPerSec * 1000, "$0.00a")}`);
+  ns.tprint(`💰 Money/sec:  ${fmtMoney(ns, best.moneyPerSec * 1000)}`);
   ns.tprint(`📈 Score:      ${best.score.toExponential(3)}`);
 
   const topN = Math.min(5, scored.length);
@@ -197,13 +203,13 @@ function choosePrimaryTarget(ns) {
     ns.tprint(
       `${i + 1}. ${h.host} | ` +
       `Score=${h.score.toExponential(2)} | ` +
-      `Money=${ns.nFormat(h.maxMoney, "$0.00a")} | ` +
+      `Money=${fmtMoney(ns, h.maxMoney)} | ` +
       `ReqHack=${h.reqHack} | ` +
       `Chance=${(h.chance * 100).toFixed(1)}% | ` +
       `Sec=${h.minSec.toFixed(1)} | ` +
       `T=${(h.tHack / 1000).toFixed(1)}s | ` +
       `hackRatio=${(h.hackRatio * 100).toFixed(0)}% | ` +
-      `$/sec=${ns.nFormat(h.moneyPerSec * 1000, "$0.00a")}`
+      `$/sec=${fmtMoney(ns, h.moneyPerSec * 1000)}`
     );
   }
 
@@ -346,10 +352,10 @@ export async function main(ns) {
   );
 
   const flags = ns.flags([
-    ["hgw", "xp"],  // "xp" or "money" for HGW mode
+    ["hgw", "money"],  // "xp" or "money" for HGW mode
   ]);
 
-  const hgwMode = String(flags.hgw ?? "xp").toLowerCase();
+  const hgwMode = String(flags.hgw ?? "money").toLowerCase();
 
   // Snapshot of current hardware for decisions
   const homeMaxRam = ns.getServerMaxRam("home");
@@ -363,20 +369,30 @@ export async function main(ns) {
     }
   }
 
-  // Dynamic home RAM reserve: 10% of home, min 8GB, max 128GB
+    // Dynamic home RAM reserve: 10% of home, min 8GB, max 128GB
   const HOME_RAM_RESERVE = (() => {
     const max = homeMaxRam;
     return Math.min(128, Math.max(8, Math.floor(max * 0.10)));
   })();
 
-  const PSERV_TARGET_RAM = 2048; // GB per purchased server (tweak as you upgrade)
+  // Dynamic pserv target RAM:
+  //  - Keep goals modest early so pserv-manager actually does work
+  //  - Scale up as home gets beefier
+  const PSERV_TARGET_RAM = (() => {
+    if (homeMaxRam < 128)  return 32;   // tiny setup
+    if (homeMaxRam < 256)  return 64;   // where you are now
+    if (homeMaxRam < 512)  return 128;
+    if (homeMaxRam < 1024) return 256;
+    return 512;                         // late midgame+ default
+  })();
 
   // Auto-toggle low-RAM mode for timed-net-batcher2:
-  // Use low-RAM mode unless home >= 512GB AND all pservs are at least 128GB.
-  const USE_LOW_RAM_MODE = !(
-    homeMaxRam >= 512 &&
-    (pservs.length > 0 ? minPservRam >= 128 : false)
-  );
+  // In "advanced" startup we only treat the environment as low-RAM when
+  // home is still tiny. Your current 128GB home + 32–128GB pservs
+  // should run full multi-batch.
+  const USE_LOW_RAM_MODE =
+    homeMaxRam < 128 &&
+    (pservs.length === 0 || minPservRam < 64);
 
   if (USE_LOW_RAM_MODE) {
     ns.tprint(

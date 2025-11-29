@@ -7,7 +7,7 @@
 
 /** @param {NS} ns */
 function fmt(ns, val, decimals = 2) {
-    return ns.nFormat(val, `0.${"0".repeat(decimals)}a`);
+    return ns.ns.formatNumber(val, `0.${"0".repeat(decimals)}a`);
 }
 
 // -------------------------------------------------------------
@@ -141,7 +141,7 @@ function printBatchOverview(ns) {
 
     const { tHack, tGrow, tWeaken, usingFormulas } = getHackGrowWeakenTimes(ns, target);
 
-    const GAP = 200; // ms – same shape as timed-net-batcher2
+    const GAP = 200; // ms ï¿½ same shape as timed-net-batcher2
     const cycleTime = tWeaken + 4 * GAP;
     const estBatchMoney = maxMoney * hackFrac;
     const estMoneyPerSec = cycleTime > 0 ? estBatchMoney / (cycleTime / 1000) : 0;
@@ -149,16 +149,16 @@ function printBatchOverview(ns) {
     ns.tprint(`Target: ${target}`);
     ns.tprint(
         `Threads (hack): ${totalHackThreads}  |  ` +
-        `HackFrac˜${(hackFrac * 100).toFixed(1)}% (capped at ${(MAX_HACK_FRACTION * 100).toFixed(0)}%)`
+        `HackFracï¿½${(hackFrac * 100).toFixed(1)}% (capped at ${(MAX_HACK_FRACTION * 100).toFixed(0)}%)`
     );
     ns.tprint(
         `Times: H=${(tHack/1000).toFixed(1)}s, ` +
         `G=${(tGrow/1000).toFixed(1)}s, ` +
-        `W=${(tWeaken/1000).toFixed(1)}s  |  cycle˜${ns.tFormat(cycleTime)}`
+        `W=${(tWeaken/1000).toFixed(1)}s  |  cycleï¿½${ns.tFormat(cycleTime)}`
     );
     ns.tprint(
-        `Est batch: ${ns.nFormat(estBatchMoney, "$0.00a")}  |  ` +
-        `Est ~${ns.nFormat(estMoneyPerSec, "$0.00a")}/sec`
+        `Est batch: ${ns.ns.formatNumber(estBatchMoney, "$0.00a")}  |  ` +
+        `Est ~${ns.ns.formatNumber(estMoneyPerSec, "$0.00a")}/sec`
     );
     ns.tprint(
         usingFormulas
@@ -174,7 +174,7 @@ function printCriticalProcesses(ns) {
         "core/timed-net-batcher2.js",
         "pserv/pserv-manager.js",
         "core/root-and-deploy.js",
-        "botnet/botnet-hgw-sync.js", // if you’ve renamed it already
+        "botnet/botnet-hgw-sync.js", // if youï¿½ve renamed it already
         REMOTE_HGW_SCRIPT,
         "hacknet/hacknet-smart.js",
         "ui/ops-dashboard.js",
