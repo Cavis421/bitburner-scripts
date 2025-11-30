@@ -1,6 +1,6 @@
 // ⚙️ Global health thresholds (more relaxed)
-const MONEY_THRESHOLD = 0.95;  // Accept 95%+ money (normal mode)
-const SEC_TOLERANCE   = 0.5;   // Allow up to +0.5 sec above min
+const MONEY_THRESHOLD = 0.90;  // Accept 95%+ money (normal mode)
+const SEC_TOLERANCE   = 0.75;   // Allow up to +0.5 sec above min
 
 // Softer thresholds for low-RAM mode (still looser)
 const LOWRAM_MONEY_THRESHOLD = 0.90; // Accept 90%+ money
@@ -9,6 +9,12 @@ const LOWRAM_SEC_TOLERANCE   = 1.50; // Accept up to +1.5 sec above min
 
 // Interval for status + profit summaries
 const STATUS_INTERVAL = 10 * 60 * 1000; // 10 minutes
+
+
+// Each batch will only try to use this fraction of *currently free* RAM.
+// This leaves space for overlapping batches and avoids "one huge batch" behavior.
+const BATCH_RAM_FRACTION = 0.6;  // 60% of free RAM per batch
+
 
 // Simple formatter wrapper for money values
 function fmtMoney(ns, value) {
@@ -417,6 +423,11 @@ function scaleHybridBatch(
 ) {
     const { baseHack, baseGrow, baseWeak } = base;
 
+    // 🔧 New: only use a fraction of the *currently free* RAM for this batch
+    // so that we can have multiple batches in flight.
+    homeFreeRam       = homeFreeRam * BATCH_RAM_FRACTION;
+    totalPservFreeRam = totalPservFreeRam * BATCH_RAM_FRACTION;
+
     // Derive ratios per 1 hack thread from the base plan
     const growPerHack  = baseGrow / baseHack;
     const weakPerHack  = baseWeak / baseHack;
@@ -476,6 +487,7 @@ function scaleHybridBatch(
 
     return { hackThreads, growThreads, weaken1Threads, weaken2Threads };
 }
+
 
 // ------------------------------------------------
 // GENERIC ALLOCATION ACROSS HOSTS

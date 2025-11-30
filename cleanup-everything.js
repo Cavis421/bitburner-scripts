@@ -2,11 +2,6 @@
 /*
 ------------------------------------------------------------
  cleanup-everything.js
- Combined utility:
-   - Kill ALL running scripts on ALL servers
-   - Delete ALL deployed .js payloads from NPC servers
-   - Delete ALL deployed .js payloads from purchased servers
-   - Leaves home scripts intact (only kills processes)
 ------------------------------------------------------------
 */
 
@@ -34,20 +29,20 @@ export async function main(ns) {
   await ns.sleep(200);
 
   // ------------------------------------------------------------
-  // 2) CLEAN NPC SERVERS
+  // 2) CLEAN NPC SERVERS (ONLY .js)
   // ------------------------------------------------------------
-  ns.tprint("🗑 Cleaning NPC servers (deleting .js, .txt payloads)...");
+  ns.tprint("🗑 Cleaning NPC servers (deleting .js only)...");
   for (const host of servers) {
     if (host === home) continue;
-    if (pservs.has(host)) continue; // handled separately
+    if (pservs.has(host)) continue;
 
     await wipeServer(ns, host);
   }
 
   // ------------------------------------------------------------
-  // 3) CLEAN PURCH SERVERS
+  // 3) CLEAN PURCHASED SERVERS (ONLY .js)
   // ------------------------------------------------------------
-  ns.tprint("🗑 Cleaning purchased servers...");
+  ns.tprint("🗑 Cleaning purchased servers (deleting .js only)...");
   for (const host of pservs) {
     await wipeServer(ns, host);
   }
@@ -75,7 +70,7 @@ function getAllServers(ns) {
   return Array.from(visited);
 }
 
-// Delete all .js, .txt files except the root filesystem
+// NEW: Delete only .js files
 async function wipeServer(ns, host) {
   const files = ns.ls(host);
   let removed = 0;
@@ -90,14 +85,11 @@ async function wipeServer(ns, host) {
   ns.tprint(`   - ${host}: removed ${removed} files`);
 }
 
+// ONLY delete .js — no .txt, no .lit, no contracts
 function isSafeToDelete(file) {
-  // Never delete contracts or important files
   if (file.endsWith(".cct")) return false;
   if (file.startsWith("README")) return false;
 
-  return (
-    file.endsWith(".js") ||
-    file.endsWith(".txt") ||
-    file.endsWith(".lit")
-  );
+  // UPDATED RULE: only remove .js
+  return file.endsWith(".js");
 }
