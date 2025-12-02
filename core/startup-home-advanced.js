@@ -352,8 +352,9 @@ export async function main(ns) {
   );
 
   const flags = ns.flags([
-    ["hgw", "money"],  // "xp" or "money" for HGW mode
-    ["help", false],   // show help and exit
+    ["hgw", "money"],   // "xp" or "money" for HGW mode
+    ["extras", ""],     // comma/space separated extras: "pserv", "hacknet", "ui", "all"
+    ["help", false],    // show help and exit
   ]);
 
   // --------------------------------------------------
@@ -365,6 +366,42 @@ export async function main(ns) {
   }
 
   const hgwMode = String(flags.hgw ?? "money").toLowerCase();
+
+  // --------------------------------------------------
+  // Parse optional extras: --extras pserv,hacknet,ui | --extras all
+  // --------------------------------------------------
+  const extrasRaw = String(flags.extras || "").toLowerCase();
+  const extrasTokens = extrasRaw
+    .split(/[,\s]+/)
+    .map(t => t.trim())
+    .filter(Boolean);
+
+  const extrasSet = new Set();
+
+  for (const token of extrasTokens) {
+    if (token === "all" || token === "*") {
+      extrasSet.add("pserv");
+      extrasSet.add("hacknet");
+      extrasSet.add("ui");
+      continue;
+    }
+    if (["pserv", "pservs", "pserver", "pservers"].includes(token)) {
+      extrasSet.add("pserv");
+      continue;
+    }
+    if (["hacknet", "hn"].includes(token)) {
+      extrasSet.add("hacknet");
+      continue;
+    }
+    if (["ui", "dashboard", "ops"].includes(token)) {
+      extrasSet.add("ui");
+      continue;
+    }
+  }
+
+  const wantPserv   = extrasSet.has("pserv");
+  const wantHacknet = extrasSet.has("hacknet");
+  const wantUi      = extrasSet.has("ui");
 
   // Snapshot of current hardware for decisions
   const homeMaxRam = ns.getServerMaxRam("home");
@@ -506,43 +543,55 @@ export async function main(ns) {
   }
 
   // 2) Remaining jobs respect the RAM budget.
-  const plan = [
-    //{
-    //  name: "pserv/pserv-manager.js",
-    //  threads: 1,
-    //  args: [PSERV_TARGET_RAM],
-    //  label: "PSERV MANAGER",
-    //  required: false,
-    //},
-    {
-      name: "core/root-and-deploy.js",
+  const plan = [];
+
+  // Always include core/root-and-deploy + botnet/botnet-hgw-sync
+  plan.push({
+    name: "core/root-and-deploy.js",
+    threads: 1,
+    args: [],
+    label: "ROOT + DEPLOY",
+    required: true,
+  });
+
+  plan.push({
+    name: "botnet/botnet-hgw-sync.js",
+    threads: 1,
+    args: [hgwTarget, hgwMode],
+    label: "BOTNET HGW SYNC",
+    required: true,
+  });
+
+  // Optional extras, controlled by --extras
+  if (wantPserv) {
+    plan.push({
+      name: "pserv/pserv-manager.js",
+      threads: 1,
+      args: [PSERV_TARGET_RAM],
+      label: "PSERV MANAGER",
+      required: false,
+    });
+  }
+
+  if (wantHacknet) {
+    plan.push({
+      name: "hacknet/hacknet-smart.js",
       threads: 1,
       args: [],
-      label: "ROOT + DEPLOY",
-      required: true,
-    },
-    {
-      name: "botnet/botnet-hgw-sync.js",
+      label: "HACKNET SMART",
+      required: false,
+    });
+  }
+
+  if (wantUi) {
+    plan.push({
+      name: "ui/ops-dashboard.js",
       threads: 1,
-      args: [hgwTarget, hgwMode],
-      label: "BOTNET HGW SYNC",
-      required: true,
-    },
-    //{
-    //  name: "hacknet/hacknet-smart.js",
-    //  threads: 1,
-    //  args: [],
-    //  label: "HACKNET SMART",
-    //  required: false,
-    //},
-    //{
-    //  name: "ui/ops-dashboard.js",
-    //  threads: 1,
-    //  args: [batchTarget],
-    //  label: "OPS DASHBOARD (one-shot)",
-    //  required: false,
-    //},
-  ];
+      args: [batchTarget],
+      label: "OPS DASHBOARD (one-shot)",
+      required: false,
+    });
+  }
 
   for (const job of plan) {
     const jobRam = cost(job.name, job.threads);
@@ -564,7 +613,7 @@ export async function main(ns) {
       continue;
     }
 
-    const pid = ns.exec(job.name, "home", job.threads, ...job.args);
+    const pid = ns.exec(job.name, "home", job.threads, ...(job.args || []));
     if (pid === 0) {
       ns.tprint(`Failed to launch ${job.label} (${job.name}).`);
     } else {
@@ -608,15 +657,18 @@ function printHelp(ns) {
   ns.tprint("  and launches:");
   ns.tprint("    - core/timed-net-batcher2.js");
   ns.tprint("    - core/root-and-deploy.js");
-  ns.tprint("    - pserv/pserv-manager.js");
   ns.tprint("    - botnet/botnet-hgw-sync.js");
-  ns.tprint("    - hacknet/hacknet-smart.js (if present)");
-  ns.tprint("    - optional UI/monitor scripts such as ui/ops-dashboard.js");
+  ns.tprint("  Optional extras via --extras:");
+  ns.tprint("    - pserv/pserv-manager.js (PSERV_TARGET_RAM goal)");
+  ns.tprint("    - hacknet/hacknet-smart.js");
+  ns.tprint("    - ui/ops-dashboard.js (one-shot dashboard)");
   ns.tprint("");
   ns.tprint("Notes");
   ns.tprint("  - Safe to rerun; it will re-kill and restart your core automation.");
   ns.tprint("  - Uses Formulas.exe automatically when present for target scoring.");
   ns.tprint("  - Auto-enables timed-net-batcher2 --lowram mode on very small setups.");
+  ns.tprint("  - --extras controls optional subsystems (pserv, hacknet, ui); default is minimal.");
+  ns.tprint("    Examples: --extras pserv | --extras pserv,hacknet,ui | --extras all");
   ns.tprint("  - HGW mode controls the secondary HGW target:");
   ns.tprint("      --hgw money  => distinct money server, separate from batch target");
   ns.tprint("      --hgw xp     => high-security XP target.");
@@ -624,8 +676,11 @@ function printHelp(ns) {
   ns.tprint("");
   ns.tprint("Syntax");
   ns.tprint("  run core/startup-home-advanced.js");
+  ns.tprint("  run core/startup-home-advanced.js --extras pserv");
+  ns.tprint("  run core/startup-home-advanced.js --extras pserv,hacknet,ui");
+  ns.tprint("  run core/startup-home-advanced.js --extras all");
   ns.tprint("  run core/startup-home-advanced.js omega-net");
   ns.tprint("  run core/startup-home-advanced.js --hgw xp");
-  ns.tprint("  run core/startup-home-advanced.js omega-net --hgw money");
+  ns.tprint("  run core/startup-home-advanced.js omega-net --hgw money --extras ui");
   ns.tprint("  run core/startup-home-advanced.js --help");
 }
