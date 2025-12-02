@@ -7,7 +7,7 @@
  *  - Upgrade offices to 4 employees and assign basic jobs
  *  - Start producing + selling Plants and Food in all cities
  *  - Maintain a simple "Smart Supply" for Water & Chemicals via API
- *  - (Optional, later) Create Chemical division and wire exports
+ *  - (Optional) Create Chemical division and wire exports
  * 
  * This is deliberately conservative:
  *  - No auto IPO, no share tricks, no dividends
@@ -17,16 +17,32 @@
  * Run on home in BN3:
  *  > run corp/bn3-corp-pipeline.js
  *
+ * Behavior:
+ *  - Default: one-shot bootstrap, performs a single corp "tick" and exits.
+ *  - With --loop: acts as a long-running corp daemon, stepping each cycle.
+ *
  * RAM: all corp API calls, so expect this to be chunky.
  * 
  * @param {NS} ns
  */
 export async function main(ns) {
+  const flags = ns.flags([
+    ["help", false],
+    ["loop", false],
+    // When true, do NOT auto-assign jobs; only create/expand/hire.
+    ["assign-none", false],
+  ]);
+
+  if (flags.help) {
+    printHelp(ns);
+    return;
+  }
+
   ns.disableLog("ALL");
 
   const corp = ns.corporation;
   if (!corp) {
-    ns.tprint("? Corporation API not available. You must be in BN3 or have SF3.3.");
+    ns.tprint("Corporation API not available. You must be in BN3 or have SF3.3.");
     return;
   }
 
@@ -34,6 +50,8 @@ export async function main(ns) {
   const AGRI_DIV = "Agri";
   const CHEM_DIV = "Chem";
   const CITIES = ["Sector-12", "Aevum", "Volhaven", "Chongqing", "New Tokyo", "Ishima"];
+
+  const assignJobs = !flags["assign-none"];
 
   // --------------------------------------------------------------------------------
   // 0. Ensure corporation exists (BN3: use seed money)
@@ -43,9 +61,9 @@ export async function main(ns) {
     try {
       // Use seed money in BN3 (second arg = useSeedMoney)
       corp.createCorporation(CORP_NAME, true);
-      ns.tprint(`?? Created corporation '${CORP_NAME}' with seed money.`);
+      ns.tprint(`Created corporation '${CORP_NAME}' with seed money.`);
     } catch (err) {
-      ns.tprint(`? Failed to create corporation: ${String(err)}`);
+      ns.tprint(`Failed to create corporation: ${String(err)}`);
       return;
     }
   } else {
@@ -54,27 +72,67 @@ export async function main(ns) {
   }
 
   // --------------------------------------------------------------------------------
-  // Main loop: drive phases each corporation cycle
+  // 1. Run either once (default) or in a continuous loop (--loop)
   // --------------------------------------------------------------------------------
 
-  while (true) {
-    try {
-      await tick(ns, AGRI_DIV, CHEM_DIV, CITIES);
-    } catch (err) {
-      ns.print(`?? bn3-corp-pipeline tick error: ${String(err)}`);
-    }
+  if (flags.loop) {
+    ns.tprint(
+      "bn3-corp-pipeline: starting in --loop mode (continuous corp daemon)" +
+      (assignJobs ? "" : " with --assign-none (no auto job rebalance)."),
+    );
+    while (true) {
+      try {
+        await tick(ns, AGRI_DIV, CHEM_DIV, CITIES, assignJobs);
+      } catch (err) {
+        ns.print(`bn3-corp-pipeline tick error: ${String(err)}`);
+      }
 
-    // Best-case: sync to corp mechanic using the official API
-    try {
-      if (corp.nextUpdate) {
-        await corp.nextUpdate();
-      } else {
+      // Sync to corp mechanic using official API when available
+      try {
+        if (corp.nextUpdate) {
+          await corp.nextUpdate();
+        } else {
+          await ns.sleep(10_000);
+        }
+      } catch {
         await ns.sleep(10_000);
       }
-    } catch {
-      await ns.sleep(10_000);
     }
+  } else {
+    // One-shot bootstrap
+    try {
+      await tick(ns, AGRI_DIV, CHEM_DIV, CITIES, assignJobs);
+    } catch (err) {
+      ns.tprint(`bn3-corp-pipeline tick error: ${String(err)}`);
+      return;
+    }
+
+    ns.tprint(
+      "BN3 corp bootstrap tick complete. Re-run or use --loop for continuous control." +
+      (assignJobs ? "" : " (--assign-none: job assignments were not modified.)"),
+    );
   }
+}
+
+// Help printer for this script.
+// Follows the shared Description / Notes / Syntax layout.
+function printHelp(ns) {
+  ns.tprint("corp/bn3-corp-pipeline.js");
+  ns.tprint("");
+  ns.tprint("Description");
+  ns.tprint("  Bootstrap and optionally maintain a simple BN3 corporation focused on Agriculture.");
+  ns.tprint("  Creates an Agriculture division, rolls it out to 6 cities, and optionally");
+  ns.tprint("  adds a Chemical support division to supply materials if funds are available.");
+  ns.tprint("");
+  ns.tprint("Notes");
+  ns.tprint("  Intended for BN3 with seed money, or any BitNode with Corporation API.");
+  ns.tprint("  Default behavior is one-shot: perform a single bootstrap 'tick' and exit.");
+  ns.tprint("  With --loop, runs continuously, stepping the corp each corporation cycle.");
+  ns.tprint("  With --assign-none, offices are sized + employees hired, but job assignments");
+  ns.tprint("  are left untouched so you can manage them manually in the UI.");
+  ns.tprint("");
+  ns.tprint("Syntax");
+  ns.tprint("  run corp/bn3-corp-pipeline.js [--help] [--loop] [--assign-none]");
 }
 
 /**
@@ -86,16 +144,16 @@ export async function main(ns) {
  *
  * @param {NS} ns
  */
-async function tick(ns, AGRI_DIV, CHEM_DIV, CITIES) {
+async function tick(ns, AGRI_DIV, CHEM_DIV, CITIES, assignJobs) {
   const corp = ns.corporation;
   const corpInfo = corp.getCorporation();
 
   // A. Agriculture division: make sure it's fully bootstrapped
-  await ensureAgricultureDivision(ns, AGRI_DIV, CITIES);
+  await ensureAgricultureDivision(ns, AGRI_DIV, CITIES, assignJobs);
 
   // B. Once we have some money, spin up Chemical as support
   if (corpInfo.funds > 5e11) {
-    await ensureChemicalSupport(ns, CHEM_DIV, AGRI_DIV, CITIES);
+    await ensureChemicalSupport(ns, CHEM_DIV, AGRI_DIV, CITIES, assignJobs);
   }
 
   // C. Tobacco + products would sit here later:
@@ -109,26 +167,31 @@ async function tick(ns, AGRI_DIV, CHEM_DIV, CITIES) {
 /**
  * Make sure we have an Agriculture division that:
  *  - Exists (industry "Agriculture")
- *  - Is in all 6 cities
+ *  - Is in all 6 cities (best-effort; will skip cities if funds are too low)
  *  - Has warehouses in all cities
- *  - Has 4-person offices with basic job spread
+ *  - Has 4-person offices with basic job spread (unless --assign-none)
  *  - Sells Plants and Food in every city
  *  - Keeps Water & Chemicals topped up with a simple scripted "Smart Supply"
+ *
+ * Idempotent: safe to re-run many times.
  *
  * @param {NS} ns
  * @param {string} divName
  * @param {string[]} CITIES
+ * @param {boolean} assignJobs  Whether to auto-assign jobs or leave them alone.
  */
-async function ensureAgricultureDivision(ns, divName, CITIES) {
+async function ensureAgricultureDivision(ns, divName, CITIES, assignJobs) {
   const corp = ns.corporation;
+  let anyChanges = false; // track whether this pass actually did anything
 
   // 1) Create Agriculture division if needed
   if (!divisionExists(corp, divName)) {
     try {
       corp.expandIndustry("Agriculture", divName);
-      ns.tprint(`?? Created Agriculture division '${divName}'.`);
+      ns.tprint(`Created Agriculture division '${divName}'.`);
+      anyChanges = true;
     } catch (err) {
-      ns.print(`?? Failed to create Agriculture division: ${String(err)}`);
+      ns.tprint(`Failed to create Agriculture division: ${String(err)}`);
       return;
     }
   }
@@ -136,44 +199,91 @@ async function ensureAgricultureDivision(ns, divName, CITIES) {
   const officeSizeTarget = 4;
 
   for (const city of CITIES) {
-    // 2) Expand to city (division.cities guards this normally, but we idempotently call expandCity)
     try {
       const div = corp.getDivision(divName);
+
+      // 2) Expand to city if we aren't there yet
       if (!div.cities.includes(city)) {
+        const funds = corp.getCorporation().funds;
+        const minFundsToExpand = 5e9; // conservative safety floor
+
+        if (funds < minFundsToExpand) {
+          ns.tprint(
+            `[${divName}/${city}] Not enough funds to expand to this city yet (have ${ns.formatNumber(
+              funds,
+            )}, want at least ${ns.formatNumber(minFundsToExpand)}).`,
+          );
+          continue;
+        }
+
         corp.expandCity(divName, city);
-        ns.tprint(`???  [${divName}] expanded to ${city}.`);
+        ns.tprint(`[${divName}] expanded to ${city}.`);
+        anyChanges = true;
       }
-    } catch (err) {
-      ns.print(`?? expandCity(${divName}, ${city}) failed: ${String(err)}`);
-    }
 
-    // 3) Ensure warehouse
-    try {
-      if (!corp.hasWarehouse(divName, city)) {
-        corp.purchaseWarehouse(divName, city);
-        ns.tprint(`??  [${divName}] purchased warehouse in ${city}.`);
+      // Re-fetch to ensure the city list is up to date
+      const div2 = corp.getDivision(divName);
+      if (!div2.cities.includes(city)) {
+        ns.print(`[${divName}/${city}] City not active after expandCity attempt; skipping setup.`);
+        continue;
       }
+
+      // 3) Ensure warehouse
+      try {
+        if (!corp.hasWarehouse(divName, city)) {
+          corp.purchaseWarehouse(divName, city);
+          ns.tprint(`[${divName}] purchased warehouse in ${city}.`);
+          anyChanges = true;
+        }
+      } catch (err) {
+        ns.print(`purchaseWarehouse(${divName}, ${city}) failed: ${String(err)}`);
+        continue;
+      }
+
+      // 4) Ensure office size >= officeSizeTarget, with optional job assignment
+      const beforeOffice = corp.getOffice(divName, city);
+      const beforeSize = beforeOffice.size;
+      const officeChanged = await ensureOfficeWithJobs(
+        ns,
+        divName,
+        city,
+        officeSizeTarget,
+        assignJobs,
+      );
+      if (officeChanged || corp.getOffice(divName, city).size > beforeSize) {
+        anyChanges = true;
+      }
+
+      // 5) Ensure we are selling Plants and Food at MAX / MP
+      ensureAgriSales(ns, divName, city);
+
+      // 6) Maintain Water + Chemicals via API "Smart Supply" substitute
+      maintainAgriInputs(ns, divName, city);
     } catch (err) {
-      ns.print(`?? purchaseWarehouse(${divName}, ${city}) failed: ${String(err)}`);
+      ns.tprint(`[${divName}/${city}] Error while bootstrapping city: ${String(err)}`);
     }
+  }
 
-    // 4) Ensure office size 4, with basic job assignment
-    await ensureOfficeWithJobs(ns, divName, city, officeSizeTarget);
-
-    // 5) Ensure we are selling Plants and Food at MAX / MP
-    ensureAgriSales(ns, divName, city);
-
-    // 6) Maintain Water + Chemicals via API "Smart Supply" substitute
-    maintainAgriInputs(ns, divName, city);
+  if (anyChanges) {
+    ns.tprint(`[${divName}] Agriculture bootstrap pass complete (changes applied).`);
+  } else {
+    ns.print(`[${divName}] Agriculture bootstrap pass: no changes needed.`);
   }
 }
 
 /**
- * Ensure an office exists with at least `targetSize` employees,
- * and split them evenly across Operations / Engineer / Business / Management.
+ * Ensure an office exists with at least `targetSize` employees.
+ *
+ * If assignJobs is true:
+ *   - Split them evenly across Operations / Engineer / Business / Management.
+ * If assignJobs is false:
+ *   - Only ensure size + hiring; leave existing job assignments untouched.
+ *
+ * @returns {boolean} true if we changed office size or job layout in this call.
  */
-async function ensureOfficeWithJobs(ns, divName, city, targetSize) {
+async function ensureOfficeWithJobs(ns, divName, city, targetSize, assignJobs) {
   const corp = ns.corporation;
+  let changed = false;
 
   let office;
   try {
@@ -182,6 +292,7 @@ async function ensureOfficeWithJobs(ns, divName, city, targetSize) {
     // Newly expanded city with no office yet
     corp.hireEmployee(divName, city, "Operations"); // triggers office creation
     office = corp.getOffice(divName, city);
+    changed = true;
   }
 
   let size = office.size;
@@ -189,23 +300,33 @@ async function ensureOfficeWithJobs(ns, divName, city, targetSize) {
     const increaseBy = targetSize - size;
     try {
       corp.upgradeOfficeSize(divName, city, increaseBy);
-      ns.tprint(`??  [${divName}/${city}] office size upgraded by +${increaseBy} to ${targetSize}.`);
+      ns.tprint(`[${divName}/${city}] office size upgraded by +${increaseBy} to ${targetSize}.`);
       size = targetSize;
+      changed = true;
     } catch (err) {
-      ns.print(`?? upgradeOfficeSize(${divName}, ${city}) failed: ${String(err)}`);
-      return;
+      ns.print(`upgradeOfficeSize(${divName}, ${city}) failed: ${String(err)}`);
+      return changed;
     }
   }
 
   // Hire up to the office size
   const toHire = size - office.numEmployees;
-  for (let i = 0; i < toHire; i++) {
-    try {
-      corp.hireEmployee(divName, city);
-    } catch (err) {
-      ns.print(`?? hireEmployee(${divName}, ${city}) failed: ${String(err)}`);
-      break;
+  if (toHire > 0) {
+    for (let i = 0; i < toHire; i++) {
+      try {
+        corp.hireEmployee(divName, city);
+        changed = true;
+      } catch (err) {
+        ns.print(`hireEmployee(${divName}, ${city}) failed: ${String(err)}`);
+        break;
+      }
     }
+  }
+
+  if (!assignJobs) {
+    // User wants manual control over jobs; do not touch assignments.
+    ns.print(`[${divName}/${city}] office size=${size}, jobs left to manual control (--assign-none).`);
+    return changed;
   }
 
   // Distribute jobs: 1 Ops, 1 Eng, 1 Biz, 1 Management (or as close as possible)
@@ -226,14 +347,16 @@ async function ensureOfficeWithJobs(ns, divName, city, targetSize) {
     if (count > 0) {
       try {
         corp.setAutoJobAssignment(divName, city, job, count);
+        changed = true;
       } catch (err) {
-        ns.print(`?? setAutoJobAssignment(${divName}, ${city}, ${job}) failed: ${String(err)}`);
+        ns.print(`setAutoJobAssignment(${divName}, ${city}, ${job}) failed: ${String(err)}`);
       }
       remaining -= count;
     }
   }
 
-  ns.print(`??  [${divName}/${city}] office jobs refreshed (size=${size}).`);
+  ns.print(`[${divName}/${city}] office jobs auto-refreshed (size=${size}).`);
+  return changed;
 }
 
 /**
@@ -248,7 +371,7 @@ function ensureAgriSales(ns, divName, city) {
       // Sell all production at market price
       corp.sellMaterial(divName, city, mat, "MAX", "MP");
     } catch (err) {
-      ns.print(`?? sellMaterial(${divName}, ${city}, ${mat}) failed: ${String(err)}`);
+      ns.print(`sellMaterial(${divName}, ${city}, ${mat}) failed: ${String(err)}`);
     }
   }
 }
@@ -269,34 +392,57 @@ function maintainAgriInputs(ns, divName, city) {
 
   if (!corp.hasWarehouse(divName, city)) return;
 
-  const wh = corp.getWarehouse(divName, city);
-  const water = corp.getMaterial(divName, city, "Water");
-  const chems = corp.getMaterial(divName, city, "Chemicals");
+  let wh;
+  try {
+    wh = corp.getWarehouse(divName, city);
+  } catch (err) {
+    ns.print(`getWarehouse(${divName}, ${city}) failed: ${String(err)}`);
+    return;
+  }
+
+  let water, chems;
+  try {
+    water = corp.getMaterial(divName, city, "Water");
+    chems = corp.getMaterial(divName, city, "Chemicals");
+  } catch (err) {
+    ns.print(`getMaterial(${divName}, ${city}) failed: ${String(err)}`);
+    return;
+  }
+
+  const waterQty = typeof water?.qty === "number" ? water.qty : 0;
+  const chemsQty = typeof chems?.qty === "number" ? chems.qty : 0;
 
   const waterTarget = 20_000 + 5_000 * wh.level;
   const chemTarget = 10_000 + 2_500 * wh.level;
 
   // Water
   try {
-    const buyRate = water.qty < waterTarget ? 500 : 0;
+    const buyRate = waterQty < waterTarget ? 500 : 0;
     corp.buyMaterial(divName, city, "Water", buyRate);
   } catch (err) {
-    ns.print(`?? buyMaterial Water [${divName}/${city}] failed: ${String(err)}`);
+    ns.print(`buyMaterial Water [${divName}/${city}] failed: ${String(err)}`);
   }
 
   // Chemicals
   try {
-    const buyRate = chems.qty < chemTarget ? 250 : 0;
+    const buyRate = chemsQty < chemTarget ? 250 : 0;
     corp.buyMaterial(divName, city, "Chemicals", buyRate);
   } catch (err) {
-    ns.print(`?? buyMaterial Chemicals [${divName}/${city}] failed: ${String(err)}`);
+    ns.print(`buyMaterial Chemicals [${divName}/${city}] failed: ${String(err)}`);
   }
 
-  ns.print(
-    `?? [${divName}/${city}] Water=${ns.formatNumber(water.qty)} / ${ns.formatNumber(
-      waterTarget,
-    )}, Chems=${ns.formatNumber(chems.qty)} / ${ns.formatNumber(chemTarget)}.`,
-  );
+  // Log with safe numbers only
+  try {
+    ns.print(
+      `[${divName}/${city}] Water=${ns.formatNumber(waterQty)} / ${ns.formatNumber(
+        waterTarget,
+      )}, Chems=${ns.formatNumber(chemsQty)} / ${ns.formatNumber(chemTarget)}.`,
+    );
+  } catch (err) {
+    ns.print(
+      `[${divName}/${city}] Water=${waterQty}/${waterTarget}, Chems=${chemsQty}/${chemTarget} (raw log; formatNumber failed).`,
+    );
+  }
 }
 
 // --------------------------------------------------------------------------------
@@ -304,29 +450,24 @@ function maintainAgriInputs(ns, divName, city) {
 // --------------------------------------------------------------------------------
 
 /**
- * Once we have some funds, create a Chemical division as a *support* industry.
+ * Once we have some funds, create a Chemical division as a support industry.
  *
- * - Minimal offices/warehouses (we don't care about its direct profit)
+ * - Minimal offices/warehouses (we do not care about its direct profit)
  * - Make Chemicals to boost Agriculture's material quality
  * - Wire exports:
- *     Agriculture ? Chemical : Plants (for Chem input)
- *     Chemical    ? Agriculture : Chemicals (for Agri input)
- *
- * @param {NS} ns
- * @param {string} chemDiv
- * @param {string} agriDiv
- * @param {string[]} CITIES
+ *     Agriculture -> Chemical : Plants (for Chem input)
+ *     Chemical    -> Agriculture : Chemicals
  */
-async function ensureChemicalSupport(ns, chemDiv, agriDiv, CITIES) {
+async function ensureChemicalSupport(ns, chemDiv, agriDiv, CITIES, assignJobs) {
   const corp = ns.corporation;
 
-  // 1) Create Chemical division if needed
+  // 1) Ensure division exists
   if (!divisionExists(corp, chemDiv)) {
     try {
       corp.expandIndustry("Chemical", chemDiv);
-      ns.tprint(`?? Created Chemical division '${chemDiv}' as support.`);
+      ns.tprint(`Created Chemical division '${chemDiv}' as support.`);
     } catch (err) {
-      ns.print(`?? Failed to create Chemical division: ${String(err)}`);
+      ns.print(`Failed to create Chemical division: ${String(err)}`);
       return;
     }
   }
@@ -340,20 +481,20 @@ async function ensureChemicalSupport(ns, chemDiv, agriDiv, CITIES) {
       const div = corp.getDivision(chemDiv);
       if (!div.cities.includes(city)) {
         corp.expandCity(chemDiv, city);
-        ns.tprint(`???  [${chemDiv}] expanded to ${city}.`);
+        ns.tprint(`[${chemDiv}] expanded to ${city}.`);
       }
     } catch (err) {
-      ns.print(`?? expandCity(${chemDiv}, ${city}) failed: ${String(err)}`);
+      ns.print(`expandCity(${chemDiv}, ${city}) failed: ${String(err)}`);
     }
 
     // warehouse
     try {
       if (!corp.hasWarehouse(chemDiv, city)) {
         corp.purchaseWarehouse(chemDiv, city);
-        ns.tprint(`??  [${chemDiv}] purchased warehouse in ${city}.`);
+        ns.tprint(`[${chemDiv}] purchased warehouse in ${city}.`);
       }
     } catch (err) {
-      ns.print(`?? purchaseWarehouse(${chemDiv}, ${city}) failed: ${String(err)}`);
+      ns.print(`purchaseWarehouse(${chemDiv}, ${city}) failed: ${String(err)}`);
     }
 
     // one tiny warehouse upgrade so it's not starved
@@ -361,20 +502,20 @@ async function ensureChemicalSupport(ns, chemDiv, agriDiv, CITIES) {
       const wh = corp.getWarehouse(chemDiv, city);
       if (wh.level < 1) {
         corp.upgradeWarehouse(chemDiv, city);
-        ns.tprint(`??  [${chemDiv}/${city}] warehouse upgraded to level 1.`);
+        ns.tprint(`[${chemDiv}/${city}] warehouse upgraded to level 1.`);
       }
     } catch (err) {
-      ns.print(`?? upgradeWarehouse(${chemDiv}, ${city}) failed: ${String(err)}`);
+      ns.print(`upgradeWarehouse(${chemDiv}, ${city}) failed: ${String(err)}`);
     }
 
     // small office with Ops/Eng/R&D
-    await ensureChemOfficeWithJobs(ns, chemDiv, city, officeSizeTarget);
+    await ensureChemOfficeWithJobs(ns, chemDiv, city, officeSizeTarget, assignJobs);
 
     // Chemicals are output; sell overflow at market price
     try {
       corp.sellMaterial(chemDiv, city, "Chemicals", "MAX", "MP");
     } catch (err) {
-      ns.print(`?? sellMaterial(${chemDiv}, ${city}, Chemicals) failed: ${String(err)}`);
+      ns.print(`sellMaterial(${chemDiv}, ${city}, Chemicals) failed: ${String(err)}`);
     }
   }
 
@@ -384,8 +525,10 @@ async function ensureChemicalSupport(ns, chemDiv, agriDiv, CITIES) {
 
 /**
  * Chemical office: small Ops/Eng/R&D mix to generate RP + quality.
+ *
+ * If assignJobs is false, we just ensure size/hiring and leave jobs alone.
  */
-async function ensureChemOfficeWithJobs(ns, divName, city, targetSize) {
+async function ensureChemOfficeWithJobs(ns, divName, city, targetSize, assignJobs) {
   const corp = ns.corporation;
 
   let office;
@@ -402,10 +545,10 @@ async function ensureChemOfficeWithJobs(ns, divName, city, targetSize) {
     const increaseBy = targetSize - size;
     try {
       corp.upgradeOfficeSize(divName, city, increaseBy);
-      ns.tprint(`??  [${divName}/${city}] Chem office size +${increaseBy} ? ${targetSize}.`);
+      ns.tprint(`[${divName}/${city}] Chem office size increased by +${increaseBy} up to ${targetSize}.`);
       size = targetSize;
     } catch (err) {
-      ns.print(`?? upgradeOfficeSize(${divName}, ${city}) failed: ${String(err)}`);
+      ns.print(`upgradeOfficeSize(${divName}, ${city}) failed: ${String(err)}`);
       return;
     }
   }
@@ -415,9 +558,14 @@ async function ensureChemOfficeWithJobs(ns, divName, city, targetSize) {
     try {
       corp.hireEmployee(divName, city);
     } catch (err) {
-      ns.print(`?? hireEmployee(${divName}, ${city}) failed: ${String(err)}`);
+      ns.print(`hireEmployee(${divName}, ${city}) failed: ${String(err)}`);
       break;
     }
+  }
+
+  if (!assignJobs) {
+    ns.print(`[${divName}/${city}] Chem office size=${size}, jobs left to manual control (--assign-none).`);
+    return;
   }
 
   // Distribution: prioritize Engineers for quality, then Ops, then R&D
@@ -436,15 +584,16 @@ async function ensureChemOfficeWithJobs(ns, divName, city, targetSize) {
     for (const job of jobs) {
       if (remaining <= 0) break;
       try {
-        corp.setAutoJobAssignment(divName, city, job, corp.getOffice(divName, city).employeeJobs[job] + 1);
+        const current = corp.getOffice(divName, city).employeeJobs[job] || 0;
+        corp.setAutoJobAssignment(divName, city, job, current + 1);
       } catch (err) {
-        ns.print(`?? setAutoJobAssignment(${divName}, ${city}, ${job}) failed: ${String(err)}`);
+        ns.print(`setAutoJobAssignment(${divName}, ${city}, ${job}) failed: ${String(err)}`);
       }
       remaining--;
     }
   }
 
-  ns.print(`?? [${divName}/${city}] Chem jobs refreshed (size=${size}).`);
+  ns.print(`[${divName}/${city}] Chem jobs auto-refreshed (size=${size}).`);
 }
 
 /**
@@ -452,7 +601,7 @@ async function ensureChemOfficeWithJobs(ns, divName, city, targetSize) {
  *   - Agriculture exports Plants to Chemical
  *   - Chemical exports Chemicals to Agriculture
  *
- * Warning: the corp API does not let us *list* existing exports, so we
+ * Warning: the corp API does not let us list existing exports, so we
  *          cancel and re-add the exact same expression every tick.
  */
 function wireExportsAgriChem(ns, agriDiv, chemDiv, CITIES) {
@@ -460,7 +609,7 @@ function wireExportsAgriChem(ns, agriDiv, chemDiv, CITIES) {
   const amtExpr = "(IPROD+IINV/10)*(-1)";
 
   for (const city of CITIES) {
-    // Agri ? Chem : Plants
+    // Agri -> Chem : Plants
     try {
       corp.cancelExportMaterial(agriDiv, city, chemDiv, city, "Plants", amtExpr);
     } catch (_) {
@@ -469,10 +618,10 @@ function wireExportsAgriChem(ns, agriDiv, chemDiv, CITIES) {
     try {
       corp.exportMaterial(agriDiv, city, chemDiv, city, "Plants", amtExpr);
     } catch (err) {
-      ns.print(`?? export Plants ${agriDiv}/${city} ? ${chemDiv}/${city} failed: ${String(err)}`);
+      ns.print(`export Plants ${agriDiv}/${city} -> ${chemDiv}/${city} failed: ${String(err)}`);
     }
 
-    // Chem ? Agri : Chemicals
+    // Chem -> Agri : Chemicals
     try {
       corp.cancelExportMaterial(chemDiv, city, agriDiv, city, "Chemicals", amtExpr);
     } catch (_) {
@@ -481,11 +630,11 @@ function wireExportsAgriChem(ns, agriDiv, chemDiv, CITIES) {
     try {
       corp.exportMaterial(chemDiv, city, agriDiv, city, "Chemicals", amtExpr);
     } catch (err) {
-      ns.print(`?? export Chemicals ${chemDiv}/${city} ? ${agriDiv}/${city} failed: ${String(err)}`);
+      ns.print(`export Chemicals ${chemDiv}/${city} -> ${agriDiv}/${city} failed: ${String(err)}`);
     }
   }
 
-  ns.print(`?? Agri?Chem exports refreshed using ${amtExpr}.`);
+  ns.print(`Agri/Chem exports refreshed using ${amtExpr}.`);
 }
 
 // --------------------------------------------------------------------------------
@@ -499,8 +648,9 @@ function wireExportsAgriChem(ns, agriDiv, chemDiv, CITIES) {
  */
 function divisionExists(corp, divName) {
   try {
-    const info = corp.getCorporation();
-    return info.divisions.some((d) => d.name === divName);
+    // getDivision throws if the division does not exist
+    corp.getDivision(divName);
+    return true;
   } catch {
     return false;
   }

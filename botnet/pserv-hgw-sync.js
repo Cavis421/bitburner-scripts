@@ -2,62 +2,58 @@
 export async function main(ns) {
     ns.disableLog("ALL");
 
-    // Target server to farm; override with arg if you want
-    const target = ns.args[0] || "omega-net";
-    const workerScript = "botnet/remote-hgw.js";
+    // Parse flags so we can support --help without breaking positional args
+    const flags = ns.flags([
+        ["help", false], // allow run ... --help
+    ]);
 
-    if (!ns.fileExists(workerScript, "home")) {
-        ns.tprint(`? ${workerScript} not found on home.`);
+    // If --help requested, print usage info and exit before normal logic
+    if (flags.help) {
+        printHelp(ns);
         return;
     }
 
-    ns.tprint(`?? pserv HGW sync started. Target: ${target}`);
+    // Original positional behavior:
+    //   flag._[0] = target (default "omega-net")
+    //   flag._[1] = mode   (default "xp")
+    const target = flags._[0] || "omega-net";
+    const mode = String(flags._[1] || "xp").toLowerCase();
 
-    // Remember last known RAM per pserv so we can detect upgrades
+    const workerScript = "botnet/remote-hgw.js";
+
+    if (!ns.fileExists(workerScript, "home")) {
+        ns.tprint(`Missing ${workerScript} on home. Cannot deploy to purchased servers.`);
+        return;
+    }
+
+    const purchased = ns.getPurchasedServers();
+    ns.tprint(`Pserv HGW sync started. Target: ${target} | Mode: ${mode.toUpperCase()}`);
+
     const lastRam = {};
 
     while (true) {
-        const pservs = ns.getPurchasedServers();
-
-        if (pservs.length === 0) {
-            ns.print("?? No purchased servers yet. Sleeping...");
-            await ns.sleep(5000);
-            continue;
-        }
-
-        for (const host of pservs) {
+        for (const host of purchased) {
             const maxRam = ns.getServerMaxRam(host);
-            if (maxRam < 2) {
-                ns.print(`?? Skipping ${host}: only ${maxRam}GB RAM`);
-                continue;
-            }
+            if (maxRam < 2) continue;
 
-            // Check if remote-hgw is already running for this target
-            const running = ns.isRunning(workerScript, host, target);
+            // Check if correct worker is already running
+            const running = ns.isRunning(workerScript, host, target, mode);
             const previousRam = lastRam[host] ?? 0;
 
-            // Conditions to redeploy:
-            //  - server is new (no lastRam entry)
-            //  - RAM increased (upgraded server)
-            //  - worker script not running
             const needsDeploy =
                 !running ||
                 maxRam > previousRam ||
                 !ns.fileExists(workerScript, host);
 
-            if (!needsDeploy) {
-                continue; // nothing to do for this host this cycle
-            }
+            if (!needsDeploy) continue;
 
-            // Redeploy on this pserv
-            ns.tprint(`?? (re)deploying HGW on ${host}: RAM ${previousRam}GB ? ${maxRam}GB`);
+            ns.tprint(`(re)deploying pserv HGW on ${host}: RAM ${previousRam}GB -> ${maxRam}GB`);
 
             ns.killall(host);
 
-            // Copy worker script from home to pserv
             const ok = await ns.scp(workerScript, host);
             if (!ok) {
-                ns.tprint(`?? Failed to SCP ${workerScript} to ${host}`);
+                ns.tprint(`Failed to SCP ${workerScript} to ${host}`);
                 continue;
             }
 
@@ -65,21 +61,37 @@ export async function main(ns) {
             const threads = Math.floor(maxRam / scriptRam);
 
             if (threads < 1) {
-                ns.tprint(`?? ${host}: not enough RAM for even 1 thread.`);
+                ns.tprint(`${host}: insufficient RAM for even one thread.`);
                 continue;
             }
 
-            const pid = ns.exec(workerScript, host, threads, target);
+            const pid = ns.exec(workerScript, host, threads, target, mode);
             if (pid === 0) {
-                ns.tprint(`? Failed to start ${workerScript} on ${host}`);
+                ns.tprint(`Failed to start ${workerScript} on ${host}`);
                 continue;
             }
 
             lastRam[host] = maxRam;
-            ns.print(`? ${host}: running ${workerScript} x${threads} vs ${target}`);
         }
 
-        // Check again every 10 seconds (tweak if you want faster/slower reaction)
-        await ns.sleep(10000);
+        await ns.sleep(10_000); // check every 10s
     }
+}
+
+/** Print help for this script. */
+function printHelp(ns) {
+    ns.tprint("botnet/pserv-hgw-sync.js");
+    ns.tprint("");
+    ns.tprint("Description");
+    ns.tprint("  Deploy botnet/remote-hgw.js onto all purchased servers.");
+    ns.tprint("  Ensures each server runs the correct target and mode, and redeploys");
+    ns.tprint("  when RAM is upgraded or the worker script is missing.");
+    ns.tprint("");
+    ns.tprint("Notes");
+    ns.tprint("  Default target is omega-net.");
+    ns.tprint("  Mode may be xp or money.");
+    ns.tprint("  Does not manage NPC servers. Use botnet-hgw-sync.js for those.");
+    ns.tprint("");
+    ns.tprint("Syntax");
+    ns.tprint("  run botnet/pserv-hgw-sync.js [target] [mode] [--help]");
 }

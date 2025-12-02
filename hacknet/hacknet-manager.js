@@ -1,11 +1,22 @@
 /** @param {NS} ns */
 export async function main(ns) {
+    // Add --help support without changing runtime behavior (script previously took no args).
+    const flags = ns.flags([
+        ["help", false],
+    ]);
+
+    // When --help is provided, print help and exit immediately.
+    if (flags.help) {
+        printHelp(ns);
+        return;
+    }
+
     ns.disableLog("ALL");
 
     // Max fraction of your current money this script is allowed to spend per cycle
     const spendFraction = 0.10;  // 10%
 
-    ns.tprint("?? hacknet-manager started (spend up to 10% of money per cycle).");
+    ns.tprint("hacknet-manager started (spend up to 10% of money per cycle).");
 
     while (true) {
         const money  = ns.getServerMoneyAvailable("home");
@@ -23,7 +34,7 @@ export async function main(ns) {
         let best = {
             type: null,   // "node" | "level" | "ram" | "core"
             index: -1,    // which node (for upgrades)
-            cost: Infinity
+            cost: Infinity,
         };
 
         // Option 1: buy a new node
@@ -32,7 +43,7 @@ export async function main(ns) {
             best = { type: "node", index: -1, cost: newNodeCost };
         }
 
-        // Option 2–4: upgrade existing nodes
+        // Option 2â€“4: upgrade existing nodes
         for (let i = 0; i < numNodes; i++) {
             const costLevel = ns.hacknet.getLevelUpgradeCost(i, 1);
             const costRam   = ns.hacknet.getRamUpgradeCost(i, 1);
@@ -52,28 +63,29 @@ export async function main(ns) {
 
         // Perform the chosen upgrade
         switch (best.type) {
-            case "node":
+            case "node": {
                 const nodeIdx = ns.hacknet.purchaseNode();
                 if (nodeIdx !== -1) {
-                    ns.print(`?? Bought Hacknet node #${nodeIdx} for ${ns.nFormat(best.cost, "0.00a")}`);
+                    ns.print(`Bought Hacknet node #${nodeIdx} for ${ns.nFormat(best.cost, "0.00a")}`);
                 }
                 break;
+            }
 
             case "level":
                 if (ns.hacknet.upgradeLevel(best.index, 1)) {
-                    ns.print(`?? Level +1 on node ${best.index} for ${ns.nFormat(best.cost, "0.00a")}`);
+                    ns.print(`Level +1 on node ${best.index} for ${ns.nFormat(best.cost, "0.00a")}`);
                 }
                 break;
 
             case "ram":
                 if (ns.hacknet.upgradeRam(best.index, 1)) {
-                    ns.print(`?? RAM +1 step on node ${best.index} for ${ns.nFormat(best.cost, "0.00a")}`);
+                    ns.print(`RAM +1 step on node ${best.index} for ${ns.nFormat(best.cost, "0.00a")}`);
                 }
                 break;
 
             case "core":
                 if (ns.hacknet.upgradeCore(best.index, 1)) {
-                    ns.print(`?? Core +1 on node ${best.index} for ${ns.nFormat(best.cost, "0.00a")}`);
+                    ns.print(`Core +1 on node ${best.index} for ${ns.nFormat(best.cost, "0.00a")}`);
                 }
                 break;
         }
@@ -81,4 +93,19 @@ export async function main(ns) {
         // Short sleep so we don't spam upgrades too fast
         await ns.sleep(1000);
     }
+}
+
+function printHelp(ns) {
+    ns.tprint("hacknet/hacknet-manager.js");
+    ns.tprint("");
+    ns.tprint("Description");
+    ns.tprint("  Simple Hacknet manager that repeatedly buys nodes or upgrades");
+    ns.tprint("  using up to 10% of your current money each cycle.");
+    ns.tprint("");
+    ns.tprint("Notes");
+    ns.tprint("  Script takes no positional arguments or options besides --help.");
+    ns.tprint("  Runs in an infinite loop; stop it manually when you no longer need upgrades.");
+    ns.tprint("");
+    ns.tprint("Syntax");
+    ns.tprint("  run hacknet/hacknet-manager.js [--help]");
 }

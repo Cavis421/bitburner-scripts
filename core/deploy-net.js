@@ -1,36 +1,133 @@
+/** core/deploy-net.js
+ *
+ * Deploy botnet/remote-hgw.js across the network.
+ *
+ * - Optional positional arg: target hostname to attack.
+ * - If no target is given, automatically picks a "best" money server.
+ * - Attempts to gain root on each server where possible.
+ * - Kills existing scripts on each host, then runs remote-hgw.js there.
+ * - Also uses some of home’s RAM after deploying to the network.
+ *
+ * Usage:
+ *   run core/deploy-net.js
+ *   run core/deploy-net.js <target>
+ *   run core/deploy-net.js --help
+ *
+ * @param {NS} ns
+ */
+
+// ------------------------------------------------------------
+// Minimal HELP: Description, Notes, Syntax
+// ------------------------------------------------------------
+
+function printHelp(ns) {
+    const script = "core/deploy-net.js";
+
+    ns.tprint("==============================================================");
+    ns.tprint(`HELP — ${script}`);
+    ns.tprint("==============================================================");
+    ns.tprint("");
+
+    // DESCRIPTION
+    ns.tprint("DESCRIPTION");
+    ns.tprint("  Deploys botnet/remote-hgw.js to all rooted servers with usable RAM,");
+    ns.tprint("  auto-selecting a good money target if none is specified.");
+    ns.tprint("");
+    ns.tprint("  For each non-home server it will:");
+    ns.tprint("    - Attempt to gain root access using available port crackers;");
+    ns.tprint("    - Kill all running scripts;");
+    ns.tprint("    - Copy botnet/remote-hgw.js; and");
+    ns.tprint("    - Launch it with as many threads as RAM allows.");
+    ns.tprint("");
+    ns.tprint("  Afterward, it also uses spare RAM on home to run remote-hgw.js.");
+    ns.tprint("");
+
+    // NOTES
+    ns.tprint("NOTES");
+    ns.tprint("  - Requires botnet/remote-hgw.js to exist on home.");
+    ns.tprint("  - Uses findBestTarget(ns) when no explicit target is provided.");
+    ns.tprint("  - Only deploys to servers where you have (or can gain) root access.");
+    ns.tprint("  - Skips servers with less than 2GB of RAM.");
+    ns.tprint("  - Leaves a small RAM reserve on home for other scripts.");
+    ns.tprint("");
+
+    // SYNTAX
+    ns.tprint("SYNTAX");
+    ns.tprint("  run core/deploy-net.js");
+    ns.tprint("  run core/deploy-net.js <target>");
+    ns.tprint("  run core/deploy-net.js --help");
+    ns.tprint("");
+
+    ns.tprint("==============================================================");
+    ns.tprint("");
+}
+
+// ------------------------------------------------------------
+// Flag parser for this script
+// ------------------------------------------------------------
+
+function parseFlags(ns) {
+    const flags = ns.flags([
+        ["help", false],
+    ]);
+
+    const positionals = flags._ || [];
+    const wantsHelp = flags.help;
+
+    return { flags, positionals, wantsHelp };
+}
+
+// ------------------------------------------------------------
+// MAIN
+// ------------------------------------------------------------
+
 /** @param {NS} ns */
 export async function main(ns) {
     ns.disableLog("ALL");
 
-    const manualTarget = ns.args[0] || null;
-    const target = manualTarget || findBestTarget(ns);
+    const { positionals, wantsHelp } = parseFlags(ns);
 
-    if (!target) {
-        ns.tprint("? No suitable target found.");
+    if (wantsHelp) {
+        printHelp(ns);
         return;
     }
 
-    ns.tprint(`?? Deploying farm against: ${target}`);
+    const manualTarget = positionals[0] || null;
+    const target = manualTarget || findBestTarget(ns);
+
+    if (!target) {
+        ns.tprint("No suitable target found.");
+        return;
+    }
+
+    const workerScript = "botnet/remote-hgw.js";
+
+    if (!ns.fileExists(workerScript, "home")) {
+        ns.tprint(`Cannot deploy — ${workerScript} not found on home.`);
+        return;
+    }
+
+    ns.tprint(`Deploying remote HGW farm against target: ${target}`);
 
     const servers = getAllServers(ns);
     const portCrackers = countPortCrackers(ns);
 
     for (const host of servers) {
-        if (host === "home") continue; // handle home separately if you want
+        if (host === "home") continue; // handle home separately
 
-        // Try to gain root if we don't have it yet
+        // Try to gain root if we do not have it yet
         if (!ns.hasRootAccess(host)) {
             tryRoot(ns, host, portCrackers);
         }
 
         if (!ns.hasRootAccess(host)) {
-            ns.print(`?? Skipping ${host} (no root)`);
+            ns.print(`Skipping ${host}: no root access.`);
             continue;
         }
 
         const maxRam = ns.getServerMaxRam(host);
         if (maxRam < 2) {
-            ns.print(`?? Skipping ${host} (too little RAM)`);
+            ns.print(`Skipping ${host}: not enough RAM (${maxRam} GB).`);
             continue;
         }
 
@@ -38,33 +135,40 @@ export async function main(ns) {
         ns.killall(host);
 
         // Copy worker script
-        const script = "botnet/remote-hgw.js";
-        await ns.scp(script, host);
+        const copied = await ns.scp(workerScript, host);
+        if (!copied) {
+            ns.print(`Failed to copy ${workerScript} to ${host}.`);
+            continue;
+        }
 
-        const scriptRam = ns.getScriptRam(script);
+        const scriptRam = ns.getScriptRam(workerScript);
         const usableRam = maxRam * 0.95; // leave 5% breathing room
         const threads = Math.floor(usableRam / scriptRam);
 
         if (threads < 1) {
-            ns.print(`?? Not enough RAM on ${host} for even 1 thread.`);
+            ns.print(`Not enough RAM on ${host} for even 1 thread.`);
             continue;
         }
 
-        const pid = ns.exec(script, host, threads, target);
+        const pid = ns.exec(workerScript, host, threads, target);
         if (pid === 0) {
-            ns.print(`? Failed to exec ${script} on ${host}`);
+            ns.print(`Failed to exec ${workerScript} on ${host}.`);
         } else {
-            ns.print(`?? ${host}: running ${script} x${threads} vs ${target}`);
+            ns.print(`${host}: running ${workerScript} x${threads} versus ${target}.`);
         }
     }
 
     // Optionally, also use some RAM on home itself
     await deployToHome(ns, target);
 
-    ns.tprint("? Deployment complete.");
+    ns.tprint("Network deployment complete.");
 }
 
-/** Use some of home�s RAM as well */
+// ------------------------------------------------------------
+// Existing helpers (logic preserved, logs de-emoji-fied)
+// ------------------------------------------------------------
+
+/** Use some of home’s RAM as well */
 async function deployToHome(ns, target) {
     const host = "home";
     const script = "botnet/remote-hgw.js";
@@ -77,21 +181,25 @@ async function deployToHome(ns, target) {
     const usableRam = Math.max(0, maxRam - usedRam - reserved);
 
     if (usableRam < 2) {
-        ns.print("?? Not enough free RAM on home to deploy.");
+        ns.print("Not enough free RAM on home to deploy.");
         return;
     }
 
-    await ns.scp(script, host);
+    const copied = await ns.scp(script, host);
+    if (!copied) {
+        ns.print(`Failed to copy ${script} to home.`);
+        return;
+    }
 
     const scriptRam = ns.getScriptRam(script);
     const threads = Math.floor(usableRam / scriptRam);
 
     if (threads < 1) {
-        ns.print("?? Not enough RAM on home for even 1 thread.");
+        ns.print("Not enough RAM on home for even 1 thread.");
         return;
     }
 
-    ns.print(`?? home: running ${script} x${threads} vs ${target}`);
+    ns.print(`home: running ${script} x${threads} versus ${target}.`);
     ns.exec(script, host, threads, target);
 }
 
@@ -145,7 +253,7 @@ function tryRoot(ns, host, portCrackers) {
     }
 }
 
-/** �Best� target: maxMoney * growth / security with filters */
+/** “Best” target: maxMoney * growth / security with filters */
 function findBestTarget(ns) {
     const servers      = getAllServers(ns);
     const hackingLevel = ns.getHackingLevel();

@@ -1,17 +1,105 @@
+/** core/net-hwgw-batcher.js
+ *
+ * Network-wide HWGW batcher:
+ *   - Auto-selects a profitable money target (or uses a manual override)
+ *   - Roots as many servers as possible
+ *   - Uses all rooted servers with RAM to run a HWGW batch
+ *   - Scales threads down if there is not enough total RAM
+ *
+ * Usage:
+ *   run core/net-hwgw-batcher.js
+ *   run core/net-hwgw-batcher.js <target>
+ *   run core/net-hwgw-batcher.js --help
+ *
+ * @param {NS} ns
+ */
+
+// ------------------------------------------------------------
+// Minimal HELP: Description, Notes, Syntax
+// ------------------------------------------------------------
+
+function printHelp(ns) {
+    const script = "core/net-hwgw-batcher.js";
+
+    ns.tprint("==============================================================");
+    ns.tprint(`HELP — ${script}`);
+    ns.tprint("==============================================================");
+    ns.tprint("");
+
+    // DESCRIPTION
+    ns.tprint("DESCRIPTION");
+    ns.tprint("  Network-wide HWGW batcher that:");
+    ns.tprint("    - Picks a profitable target automatically (or uses a manual one),");
+    ns.tprint("    - Attempts to gain root on as many servers as possible, and");
+    ns.tprint("    - Runs a HWGW batch across all rooted servers with usable RAM.");
+    ns.tprint("");
+    ns.tprint("  Batch size is planned from the target's money/security stats and");
+    ns.tprint("  then scaled down if total free RAM across the network is not enough");
+    ns.tprint("  to support the ideal plan.");
+    ns.tprint("");
+
+    // NOTES
+    ns.tprint("NOTES");
+    ns.tprint("  - Requires batch/batch-hack.js, batch/batch-grow.js,");
+    ns.tprint("    and batch/batch-weaken.js on home.");
+    ns.tprint("  - Uses findBestTarget(ns) when no target is provided.");
+    ns.tprint("  - Tries to root servers using available port crackers before use.");
+    ns.tprint("  - Keeps a 32GB RAM reserve on home for other scripts.");
+    ns.tprint("  - Safe to stop and restart; each loop recalculates threads based");
+    ns.tprint("    on current stats and RAM.");
+    ns.tprint("");
+
+    // SYNTAX
+    ns.tprint("SYNTAX");
+    ns.tprint("  run core/net-hwgw-batcher.js");
+    ns.tprint("  run core/net-hwgw-batcher.js <target>");
+    ns.tprint("  run core/net-hwgw-batcher.js --help");
+    ns.tprint("");
+
+    ns.tprint("==============================================================");
+    ns.tprint("");
+}
+
+// ------------------------------------------------------------
+// Flag parser for this script
+// ------------------------------------------------------------
+
+function parseFlags(ns) {
+    const flags = ns.flags([
+        ["help", false],
+    ]);
+
+    const positionals = flags._ || [];
+    const wantsHelp = flags.help;
+
+    return { flags, positionals, wantsHelp };
+}
+
+// ------------------------------------------------------------
+// MAIN
+// ------------------------------------------------------------
+
 /** @param {NS} ns */
 export async function main(ns) {
     ns.disableLog("ALL");
 
-    // Optional: override target with arg, else auto-pick
-    const manualTarget = ns.args[0] || null;
-    const target = manualTarget || findBestTarget(ns);
+    const { positionals, wantsHelp } = parseFlags(ns);
 
-    if (!target) {
-        ns.tprint("? No suitable target found.");
+    if (wantsHelp) {
+        printHelp(ns);
         return;
     }
 
-    ns.tprint(`?? Network HWGW batcher targeting: ${target}`);
+    // Optional: override target with arg, else auto-pick
+    const manualTarget = positionals[0] || null;
+    const target = manualTarget || findBestTarget(ns);
+
+    if (!target) {
+        ns.tprint("No suitable target found.");
+        return;
+    }
+
+    ns.tprint(`Network HWGW batcher targeting: ${target}`);
 
     // Pre-root as much of the network as we can
     const allServers = getAllServers(ns);
@@ -25,7 +113,7 @@ export async function main(ns) {
     }
 
     if (!ns.hasRootAccess(target)) {
-        ns.tprint(`? No root access on target ${target}. Get more programs / levels.`);
+        ns.tprint(`No root access on target ${target}. Get more programs or levels.`);
         return;
     }
 
@@ -38,7 +126,7 @@ export async function main(ns) {
         // Recalculate per-batch threads in case your stats changed
         const batchPlan = calcBatchThreads(ns, target, hackScript, growScript, weakenScript);
         if (!batchPlan) {
-            ns.tprint("? Failed to calculate batch threads (maybe target has no money?).");
+            ns.tprint("Failed to calculate batch threads (maybe target has no money?).");
             return;
         }
 
@@ -49,7 +137,7 @@ export async function main(ns) {
         const totalFreeRam = hosts.reduce((sum, h) => sum + h.freeRam, 0);
 
         if (totalFreeRam < ramPerBatch) {
-            ns.tprint("?? Not enough total RAM for even one full batch; scaling down.");
+            ns.tprint("Not enough total RAM for even one full batch; scaling down.");
         }
 
         // Scale down threads if needed to fit available RAM
@@ -59,16 +147,19 @@ export async function main(ns) {
             ((weak1Threads + weak2Threads) * ns.getScriptRam(weakenScript));
 
         let scale = 1;
-        if (totalRamNeededFull > totalFreeRam) {
+        if (totalRamNeededFull > totalFreeRam && totalRamNeededFull > 0) {
             scale = totalFreeRam / totalRamNeededFull;
         }
 
-        hackThreads   = Math.max(1, Math.floor(hackThreads * scale));
-        growThreads   = Math.max(1, Math.floor(growThreads * scale));
-        weak1Threads  = Math.max(1, Math.floor(weak1Threads * scale));
-        weak2Threads  = Math.max(1, Math.floor(weak2Threads * scale));
+        hackThreads  = Math.max(1, Math.floor(hackThreads  * scale));
+        growThreads  = Math.max(1, Math.floor(growThreads  * scale));
+        weak1Threads = Math.max(1, Math.floor(weak1Threads * scale));
+        weak2Threads = Math.max(1, Math.floor(weak2Threads * scale));
 
-        ns.print(`Batch threads (scaled x${scale.toFixed(2)}): H=${hackThreads}, G=${growThreads}, W1=${weak1Threads}, W2=${weak2Threads}`);
+        ns.print(
+            `Batch threads (scaled x${scale.toFixed(2)}): ` +
+            `H=${hackThreads}, G=${growThreads}, W1=${weak1Threads}, W2=${weak2Threads}`
+        );
 
         // Refresh RAM info for allocation
         refreshHostRam(ns, hosts);
@@ -83,12 +174,16 @@ export async function main(ns) {
         const tGrow   = ns.getGrowTime(target);
         const tWeaken = ns.getWeakenTime(target);
 
-        const cycleTime = Math.max(tHack, tGrow, tWeaken) + 2000; // little safety buffer
+        const cycleTime = Math.max(tHack, tGrow, tWeaken) + 2000; // small safety buffer
 
-        ns.print(`? Waiting ${ns.tFormat(cycleTime)} for batch to settle...`);
+        ns.print(`Waiting ${ns.tFormat(cycleTime)} for batch to settle...`);
         await ns.sleep(cycleTime);
     }
 }
+
+// ------------------------------------------------------------
+// Batch planning helpers
+// ------------------------------------------------------------
 
 /**
  * Calculate threads for a single HWGW batch targeting ~5% of money.
@@ -99,7 +194,6 @@ function calcBatchThreads(ns, target, hackScript, growScript, weakenScript) {
 
     const hackPercent = 0.05; // target 5% of max money per batch
     const hackAnalyzeValue = ns.hackAnalyze(target);
-
     if (hackAnalyzeValue <= 0) return null;
 
     let hackThreads = Math.floor(hackPercent / hackAnalyzeValue);
@@ -137,9 +231,13 @@ function calcBatchThreads(ns, target, hackScript, growScript, weakenScript) {
         growThreads,
         weak1Threads,
         weak2Threads,
-        ramPerBatch
+        ramPerBatch,
     };
 }
+
+// ------------------------------------------------------------
+// Network helpers
+// ------------------------------------------------------------
 
 /**
  * Get all reachable servers.
@@ -211,7 +309,7 @@ function getUsableHosts(ns) {
         const maxRam = ns.getServerMaxRam(host);
         if (maxRam < 2) continue;
 
-        let usedRam = ns.getServerUsedRam(host);
+        const usedRam = ns.getServerUsedRam(host);
         let freeRam = maxRam - usedRam;
 
         if (host === "home") {
@@ -233,13 +331,14 @@ function getUsableHosts(ns) {
 function refreshHostRam(ns, hosts) {
     for (const h of hosts) {
         const maxRam = ns.getServerMaxRam(h.host);
-        let usedRam  = ns.getServerUsedRam(h.host);
-        let freeRam  = maxRam - usedRam;
+        const usedRam = ns.getServerUsedRam(h.host);
+        let freeRam = maxRam - usedRam;
 
         if (h.host === "home") {
             const reserve = 32;
             freeRam = Math.max(0, maxRam - usedRam - reserve);
         }
+
         h.freeRam = Math.max(0, freeRam);
     }
 }
@@ -267,7 +366,7 @@ function allocThreads(ns, hosts, script, target, threadsNeeded) {
     }
 
     if (threadsNeeded > 0) {
-        ns.print(`?? Could not allocate ${threadsNeeded} threads for ${script}; RAM exhausted.`);
+        ns.print(`Could not allocate ${threadsNeeded} threads for ${script}; RAM exhausted.`);
     }
 }
 

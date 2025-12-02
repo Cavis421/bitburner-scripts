@@ -7,13 +7,91 @@
  * Usage:
  *   run core/root-and-deploy.js
  *   run core/root-and-deploy.js joesguns   // optional arg, currently informational only
+ *   run core/root-and-deploy.js --help     // show description/notes/syntax
  *
  * @param {NS} ns
  */
+
+// ------------------------------------------------------------
+// HELP + FLAG PARSING
+// ------------------------------------------------------------
+
+/**
+ * Minimal help: Description, Notes, Syntax.
+ * @param {NS} ns
+ */
+function printHelp(ns) {
+    const script = "core/root-and-deploy.js";
+
+    ns.tprint("==============================================================");
+    ns.tprint(`   HELP — ${script}`);
+    ns.tprint("==============================================================\n");
+
+    // DESCRIPTION
+    ns.tprint("DESCRIPTION");
+    ns.tprint("  Scan the network from 'home', gain root on servers when possible,");
+    ns.tprint("  and copy batch infrastructure scripts to rooted hosts with RAM.");
+    ns.tprint("  This prepares the network for HWGW batchers without actually");
+    ns.tprint("  starting any swarm/HGW worker scripts.");
+    ns.tprint("");
+
+    // NOTES
+    ns.tprint("NOTES");
+    ns.tprint("  - Does NOT start botnet/remote-hgw.js or botnet/botnet-hgw-sync.js.");
+    ns.tprint("  - Safe to run repeatedly; it only (re)roots and copies scripts.");
+    ns.tprint("  - Respects your hacking level and available port crackers.");
+    ns.tprint("  - Only copies batch scripts to servers with at least 2GB RAM.");
+    ns.tprint("  - The optional [target] argument is currently informational only");
+    ns.tprint("    and does not change behavior.");
+    ns.tprint("");
+
+    // SYNTAX
+    ns.tprint("SYNTAX");
+    ns.tprint("  run core/root-and-deploy.js");
+    ns.tprint("  run core/root-and-deploy.js [target]");
+    ns.tprint("  run core/root-and-deploy.js --help   # show this help");
+    ns.tprint("");
+
+    ns.tprint("==============================================================\n");
+}
+
+/**
+ * Simple flag parser for this script.
+ * - Supports: --help and -? (both show help and exit).
+ * - Returns positionals separately.
+ *
+ * @param {NS} ns
+ */
+function parseFlags(ns) {
+    const raw = [...ns.args];
+
+    const flags = ns.flags([
+        ["help", false],
+    ]);
+
+    const positionals = flags._ || [];
+    const wantsHelp = flags.help || raw.includes("-?");
+
+    return { flags, positionals, wantsHelp };
+}
+
+// ------------------------------------------------------------
+// MAIN
+// ------------------------------------------------------------
+
 export async function main(ns) {
     ns.disableLog("ALL");
 
-    const manualTarget = ns.args[0] || null;
+    const { positionals, wantsHelp } = parseFlags(ns);
+
+    if (wantsHelp) {
+        printHelp(ns);
+        return; // do not run normal behavior
+    }
+
+    // Original positional arg behavior preserved:
+    //   manualTarget = first positional, or null if none provided.
+    const manualTarget = positionals[0] || null;
 
     const hackingLevel = ns.getHackingLevel();
     const portCrackers = countPortCrackers(ns);
@@ -132,10 +210,9 @@ function getAllServers(ns) {
         if (visited.has(host)) continue;
         visited.add(host);
 
-        for (const neighbor of ns.scan(host)) {
-            if (!visited.has(neighbor)) queue.push(neighbor);
+        for (const h of ns.scan(host)) {
+            if (!visited.has(h)) queue.push(h);
         }
     }
-
     return Array.from(visited);
 }

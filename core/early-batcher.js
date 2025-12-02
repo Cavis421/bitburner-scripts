@@ -1,29 +1,125 @@
+/** core/early-batcher.js
+ *
+ * Simple early-game HWGW batcher that:
+ *   - Runs only on home
+ *   - Auto-selects a money target (or uses a manual override)
+ *   - Uses a simple H/G/W ratio with up to ~90% of home RAM
+ *
+ * Usage:
+ *   run core/early-batcher.js
+ *   run core/early-batcher.js <target>
+ *   run core/early-batcher.js --help
+ *
+ * @param {NS} ns
+ */
+
+// ------------------------------------------------------------
+// Minimal HELP: Description, Notes, Syntax
+// ------------------------------------------------------------
+
+function printHelp(ns) {
+    const script = "core/early-batcher.js";
+
+    ns.tprint("==============================================================");
+    ns.tprint(`HELP — ${script}`);
+    ns.tprint("==============================================================");
+    ns.tprint("");
+
+    // DESCRIPTION
+    ns.tprint("DESCRIPTION");
+    ns.tprint("  Early-game HWGW batcher that runs only on home.");
+    ns.tprint("  Picks a target automatically based on money/growth/security,");
+    ns.tprint("  or uses a manual override if you supply one.");
+    ns.tprint("");
+    ns.tprint("  It repeatedly:");
+    ns.tprint("    - Computes how much of home's RAM is available (up to 90%),");
+    ns.tprint("    - Schedules a single batch with 20% hack, 40% grow, 40% weaken,");
+    ns.tprint("    - Waits for weaken to finish, then repeats.");
+    ns.tprint("");
+
+    // NOTES
+    ns.tprint("NOTES");
+    ns.tprint("  - Runs only on home; does not use purchased servers.");
+    ns.tprint("  - Requires batch/hack-worker.js, batch/grow-worker.js,");
+    ns.tprint("    and batch/weaken-worker.js to exist on home.");
+    ns.tprint("  - Uses findBestTarget(ns) when no target is provided.");
+    ns.tprint("  - Attempts to gain root on the chosen target using available");
+    ns.tprint("    port crackers before starting batches.");
+    ns.tprint("");
+
+    // SYNTAX
+    ns.tprint("SYNTAX");
+    ns.tprint("  run core/early-batcher.js");
+    ns.tprint("  run core/early-batcher.js <target>");
+    ns.tprint("  run core/early-batcher.js --help");
+    ns.tprint("");
+
+    ns.tprint("==============================================================");
+    ns.tprint("");
+}
+
+// ------------------------------------------------------------
+// Flag parser for this script
+// ------------------------------------------------------------
+
+function parseFlags(ns) {
+    const flags = ns.flags([
+        ["help", false],
+    ]);
+
+    const positionals = flags._ || [];
+    const wantsHelp = flags.help;
+
+    return { flags, positionals, wantsHelp };
+}
+
+// ------------------------------------------------------------
+// MAIN
+// ------------------------------------------------------------
+
 /** @param {NS} ns */
 export async function main(ns) {
     ns.disableLog("ALL");
 
-    const argTarget = ns.args[0]; // optional manual override
-    const target = argTarget || findBestTarget(ns);
+    const { positionals, wantsHelp } = parseFlags(ns);
 
-    if (!target) {
-        ns.tprint("? No suitable target found.");
+    if (wantsHelp) {
+        printHelp(ns);
         return;
     }
 
-    ns.tprint(`?? Batching against: ${target}`);
+    const argTarget = positionals[0] || null; // optional manual override
+    const target = argTarget || findBestTarget(ns);
+
+    if (!target) {
+        ns.tprint("No suitable target found.");
+        return;
+    }
+
+    ns.tprint(`Batching against: ${target}`);
 
     // Ensure root
     if (!ns.hasRootAccess(target)) {
         openPortsAndNuke(ns, target);
     }
     if (!ns.hasRootAccess(target)) {
-        ns.tprint(`? Still no root on ${target}. Need more port crackers or hacking level.`);
+        ns.tprint(
+            `Still no root on ${target}. Need more port crackers or hacking level.`
+        );
         return;
     }
 
     const hackScript   = "batch/hack-worker.js";
     const growScript   = "batch/grow-worker.js";
     const weakenScript = "batch/weaken-worker.js";
+
+    // Basic safety check: make sure worker scripts exist
+    for (const s of [hackScript, growScript, weakenScript]) {
+        if (!ns.fileExists(s, "home")) {
+            ns.tprint(`Missing required worker script on home: ${s}`);
+            return;
+        }
+    }
 
     while (true) {
         const maxRam  = ns.getServerMaxRam("home");
@@ -33,7 +129,7 @@ export async function main(ns) {
         const targetUsage = maxRam * 0.9;
         const freeForBatch = targetUsage - usedRam;
         if (freeForBatch <= 0) {
-            ns.print("?? No room for more batches, waiting...");
+            ns.print("No room for more batches, waiting.");
             await ns.sleep(2000);
             continue;
         }
@@ -58,7 +154,7 @@ export async function main(ns) {
         let gThreads = Math.max(1, Math.floor(maxThreads * 0.4));
         let wThreads = Math.max(1, maxThreads - hThreads - gThreads);
 
-        ns.print(`?? Batch: H=${hThreads}, G=${gThreads}, W=${wThreads}`);
+        ns.print(`Batch: H=${hThreads}, G=${gThreads}, W=${wThreads}`);
 
         ns.exec(weakenScript, "home", wThreads, target);
         ns.exec(growScript, "home", gThreads, target);
@@ -69,7 +165,9 @@ export async function main(ns) {
     }
 }
 
-/** Helpers � same idea as botnet/auto-hgw.js */
+// ------------------------------------------------------------
+// Helpers – same idea as botnet/auto-hgw.js
+// ------------------------------------------------------------
 
 function getAllServers(ns) {
     const visited = new Set();
@@ -108,7 +206,9 @@ function openPortsAndNuke(ns, target) {
     if (ns.fileExists("SQLInject.exe", "home")) ns.sqlinject(target);
     try {
         ns.nuke(target);
-    } catch { }
+    } catch {
+        // hasRootAccess will tell us if it worked
+    }
 }
 
 function findBestTarget(ns) {

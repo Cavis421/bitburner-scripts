@@ -1,5 +1,17 @@
 /** @param {NS} ns */
 export async function main(ns) {
+    // Use flags so we can support --help without breaking positional args
+    const flags = ns.flags([
+        ["help", false], // standard help flag for all scripts
+    ]);
+
+    // Help: print description/notes/syntax and exit before any normal logic
+    if (flags.help) {
+        printHelp(ns);
+        return;
+    }
+
+    // This script previously did not use any arguments; keep behavior the same
     const target = findBestTarget(ns);
 
     if (!target) {
@@ -41,6 +53,27 @@ export async function main(ns) {
             await ns.hack(target);
         }
     }
+}
+
+/**
+ * Print script help in a consistent, minimal format.
+ * Uses only ns.tprint and exits before running any main logic.
+ * @param {NS} ns
+ */
+function printHelp(ns) {
+    ns.tprint("botnet/auto-hgw.js");
+    ns.tprint("");
+    ns.tprint("Description");
+    ns.tprint("  Automatically selects a strong money target and runs a simple hack-grow-weaken loop.");
+    ns.tprint("  Tries to keep the server near max money and low security for steady income.");
+    ns.tprint("");
+    ns.tprint("Notes");
+    ns.tprint("  Chooses targets based on money, growth, and security using your current hacking stats.");
+    ns.tprint("  Attempts to gain root on the chosen target using any available port crackers.");
+    ns.tprint("  Intended for use on a single host; it does not coordinate batches across the network.");
+    ns.tprint("");
+    ns.tprint("Syntax");
+    ns.tprint("  run botnet/auto-hgw.js [--help]");
 }
 
 /** Find all servers reachable from 'home' */
@@ -88,7 +121,7 @@ function openPortsAndNuke(ns, target) {
     }
 }
 
-/** Pick the “best” target: money × growth / security, with some filters */
+/** Pick the "best" target: money Ã— growth / security, with some filters */
 function findBestTarget(ns) {
     const servers       = getAllServers(ns);
     const hackingLevel  = ns.getHackingLevel();

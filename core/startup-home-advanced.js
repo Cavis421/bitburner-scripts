@@ -347,13 +347,22 @@ export async function main(ns) {
   const formulasAvailable = hasFormulas(ns);
   ns.tprint(
     formulasAvailable
-      ? "ℹ️ Formulas.exe detected — using formulas-based times/chance where possible."
-      : "ℹ️ Formulas.exe not detected — using built-in timing/scoring APIs."
+      ? "Formulas.exe detected — using formulas-based times/chance where possible."
+      : "Formulas.exe not detected — using built-in timing/scoring APIs."
   );
 
   const flags = ns.flags([
     ["hgw", "money"],  // "xp" or "money" for HGW mode
+    ["help", false],   // show help and exit
   ]);
+
+  // --------------------------------------------------
+  // --help short-circuit
+  // --------------------------------------------------
+  if (flags.help) {
+    printHelp(ns);
+    return;
+  }
 
   const hgwMode = String(flags.hgw ?? "money").toLowerCase();
 
@@ -369,7 +378,7 @@ export async function main(ns) {
     }
   }
 
-    // Dynamic home RAM reserve: 10% of home, min 8GB, max 128GB
+  // Dynamic home RAM reserve: 10% of home, min 8GB, max 128GB
   const HOME_RAM_RESERVE = (() => {
     const max = homeMaxRam;
     return Math.min(128, Math.max(8, Math.floor(max * 0.10)));
@@ -380,28 +389,28 @@ export async function main(ns) {
   //  - Scale up as home gets beefier
   const PSERV_TARGET_RAM = (() => {
     if (homeMaxRam < 128)  return 32;   // tiny setup
-    if (homeMaxRam < 256)  return 64;   // where you are now
+    if (homeMaxRam < 256)  return 64;
     if (homeMaxRam < 512)  return 128;
     if (homeMaxRam < 1024) return 256;
-    return 512;                         // late midgame+ default
+    if (homeMaxRam < 2048) return 512;
+    return 1024;
   })();
 
   // Auto-toggle low-RAM mode for timed-net-batcher2:
   // In "advanced" startup we only treat the environment as low-RAM when
-  // home is still tiny. Your current 128GB home + 32–128GB pservs
-  // should run full multi-batch.
+  // home is still tiny.
   const USE_LOW_RAM_MODE =
     homeMaxRam < 128 &&
     (pservs.length === 0 || minPservRam < 64);
 
   if (USE_LOW_RAM_MODE) {
     ns.tprint(
-      `🩳 Low-RAM batch mode ENABLED for timed-net-batcher2.js ` +
+      "Low-RAM batch mode ENABLED for timed-net-batcher2.js " +
       `(home=${homeMaxRam.toFixed(1)}GB, min pserv=${minPservRam || 0}GB).`
     );
   } else {
     ns.tprint(
-      `🧪 Full batch mode (no --lowram) for timed-net-batcher2.js ` +
+      "Full batch mode (no --lowram) for timed-net-batcher2.js " +
       `(home=${homeMaxRam.toFixed(1)}GB, min pserv=${minPservRam || 0}GB).`
     );
   }
@@ -414,35 +423,48 @@ export async function main(ns) {
 
   if (override) {
     batchTarget = override;
-    ns.tprint(`🎯 STARTUP-HOME: Manual override batch target: ${batchTarget}`);
+    ns.tprint(`STARTUP-HOME: Manual override batch target: ${batchTarget}`);
   } else {
     const { target: autoTarget } = choosePrimaryTarget(ns);
     batchTarget = autoTarget || "n00dles";
-    ns.tprint(`🎯 STARTUP-HOME: Auto-selected batch target: ${batchTarget}`);
+    ns.tprint(`STARTUP-HOME: Auto-selected batch target: ${batchTarget}`);
   }
 
-  // Choose HGW target (XP or money), *distinct* from batch target when possible
+  // Choose HGW target (XP or money), distinct from batch target when possible
   if (hgwMode === "money") {
-    ns.tprint("💰 HGW Mode: MONEY");
+    ns.tprint("HGW Mode: MONEY");
     hgwTarget = chooseSecondaryTarget(ns, batchTarget);
   } else {
-    ns.tprint("🧠 HGW Mode: XP");
+    ns.tprint("HGW Mode: XP");
     hgwTarget = chooseXpTarget(ns, batchTarget);
   }
 
-  ns.tprint(`🎯 BATCH TARGET (money):      ${batchTarget}`);
-  ns.tprint(`🎯 HGW TARGET (${hgwMode.toUpperCase()}): ${hgwTarget}`);
+  ns.tprint(`BATCH TARGET (money):      ${batchTarget}`);
+  ns.tprint(`HGW TARGET (${hgwMode.toUpperCase()}): ${hgwTarget}`);
 
-  // Kill everything on home except this script
-  ns.tprint("🏠 STARTUP-HOME: Killing all processes on home...");
+  // Kill everything on home except:
+  //  - this startup script
+  //  - corp/agri-structure.js
+  //  - corp/agri-inputs.js
+  //  - corp/agri-sales.js
+  ns.tprint(
+    "STARTUP-HOME: Killing all processes on home " +
+    "(except startup + corp/agri-structure.js + corp/agri-inputs.js + corp/agri-sales.js)."
+  );
   const myPid = ns.pid;
+  const keepFiles = new Set([
+    "corp/agri-structure.js",
+    "corp/agri-inputs.js",
+    "corp/agri-sales.js",
+  ]);
   const processes = ns.ps("home");
   for (const p of processes) {
     if (p.pid === myPid) continue;
+    if (keepFiles.has(p.filename)) continue;
     ns.kill(p.pid);
   }
   await ns.sleep(200); // allow cleanup
-  ns.tprint("✔️ Home is clean. Relaunching core automation...");
+  ns.tprint("Home is clean. Relaunching core automation.");
 
   // --------------------------------------------------
   // RAM-aware scheduler
@@ -451,14 +473,14 @@ export async function main(ns) {
   // Helper: calculate RAM cost for a script@threads (or Infinity if missing)
   function cost(script, threads = 1) {
     if (!ns.fileExists(script, "home")) {
-      ns.tprint(`⚠️ Missing script (skipping in plan): ${script}`);
+      ns.tprint(`Missing script (skipping in plan): ${script}`);
       return Infinity;
     }
     return ns.getScriptRam(script, "home") * threads;
   }
 
   const maxRam = homeMaxRam;
-  const budget  = maxRam - HOME_RAM_RESERVE; // total RAM we’re willing to spend on non-batcher stuff
+  const budget = maxRam - HOME_RAM_RESERVE; // total RAM we are willing to spend on non-batcher stuff
   let usedPlanned = ns.getServerUsedRam("home"); // starts with just this script
 
   // 1) ALWAYS try to launch MONEY BATCHER first, ignoring the soft budget.
@@ -468,100 +490,87 @@ export async function main(ns) {
   if (isFinite(batcherRamCost)) {
     if (batcherRamCost > maxRam) {
       ns.tprint(
-        `❌ MONEY BATCHER (core/timed-net-batcher2.js) alone needs ${batcherRamCost.toFixed(
-          1,
-        )}GB, which exceeds home RAM (${maxRam.toFixed(1)}GB).`
+        "MONEY BATCHER (core/timed-net-batcher2.js) alone needs " +
+        `${batcherRamCost.toFixed(1)}GB, which exceeds home RAM (${maxRam.toFixed(1)}GB).`
       );
     } else {
       const pid = ns.exec("core/timed-net-batcher2.js", "home", 1, ...batcherArgs);
       if (pid === 0) {
-        ns.tprint("❌ Failed to launch MONEY BATCHER (core/timed-net-batcher2.js).");
+        ns.tprint("Failed to launch MONEY BATCHER (core/timed-net-batcher2.js).");
       } else {
         usedPlanned = ns.getServerUsedRam("home"); // refresh from real usage
         const argInfo = batcherArgs.length ? ` ${JSON.stringify(batcherArgs)}` : "";
-        ns.tprint(`🚨 Started REQUIRED MONEY BATCHER (pid ${pid})${argInfo}`);
+        ns.tprint(`Started REQUIRED MONEY BATCHER (pid ${pid})${argInfo}`);
       }
     }
   }
 
   // 2) Remaining jobs respect the RAM budget.
   const plan = [
+    //{
+    //  name: "pserv/pserv-manager.js",
+    //  threads: 1,
+    //  args: [PSERV_TARGET_RAM],
+    //  label: "PSERV MANAGER",
+    //  required: false,
+    //},
     {
-      name: "pserv/pserv-manager.js",
+      name: "core/root-and-deploy.js",
       threads: 1,
-      args: [PSERV_TARGET_RAM],
-      priority: 1,
-      required: false,
-      label: "PSERV MANAGER",
+      args: [],
+      label: "ROOT + DEPLOY",
+      required: true,
     },
     {
       name: "botnet/botnet-hgw-sync.js",
       threads: 1,
       args: [hgwTarget, hgwMode],
-      priority: 2,
-      required: false,
-      label: "BOTNET HGW",
-    },
-    {
-      name: "core/root-and-deploy.js",
-      threads: 1,
-      args: [batchTarget],
-      priority: 3,
-      required: false,
-      label: "ROOT-AND-DEPLOY",
+      label: "BOTNET HGW SYNC",
+      required: true,
     },
     //{
-    //  name: "darkweb/darkweb-auto-buyer.js",
+    //  name: "hacknet/hacknet-smart.js",
     //  threads: 1,
     //  args: [],
-    //  priority: 4,
+    //  label: "HACKNET SMART",
     //  required: false,
-    //  label: "DARKWEB BUYER",
     //},
-    {
-      name: "hacknet/hacknet-status.js",
-      threads: 1,
-      args: [],
-      priority: 5,
-      required: false,
-      label: "HACKNET STATUS",
-    },
-    // Optional dashboard:
-    // {
-    //   name: "ui/ops-dashboard.js",
-    //   threads: 1,
-    //   args: [batchTarget],
-    //   priority: 6,
-    //   required: false,
-    //   label: "OPS DASHBOARD",
-    // },
+    //{
+    //  name: "ui/ops-dashboard.js",
+    //  threads: 1,
+    //  args: [batchTarget],
+    //  label: "OPS DASHBOARD (one-shot)",
+    //  required: false,
+    //},
   ];
 
-  // Sort by priority (then by label just to stabilize)
-  plan.sort((a, b) => a.priority - b.priority || a.label.localeCompare(b.label));
-
   for (const job of plan) {
-    const ramCost = cost(job.name, job.threads);
-    if (!isFinite(ramCost)) continue; // missing script, already warned
+    const jobRam = cost(job.name, job.threads);
+    if (!isFinite(jobRam)) {
+      if (job.required) {
+        ns.tprint(`Required job ${job.label} (${job.name}) is missing.`);
+      }
+      continue;
+    }
 
-    const futureUsed = usedPlanned + ramCost;
+    const futureUsed = usedPlanned + jobRam;
 
     // Normal case: respect RAM budget
     if (futureUsed > budget) {
       ns.tprint(
-        `❌ Skipping ${job.label} (${job.name}) — would exceed budget ` +
-          `${futureUsed.toFixed(1)}GB > ${budget.toFixed(1)}GB`,
+        "Skipping " + job.label + " (" + job.name + ") — would exceed budget " +
+        `${futureUsed.toFixed(1)}GB > ${budget.toFixed(1)}GB`
       );
       continue;
     }
 
     const pid = ns.exec(job.name, "home", job.threads, ...job.args);
     if (pid === 0) {
-      ns.tprint(`❌ Failed to launch ${job.label} (${job.name}).`);
+      ns.tprint(`Failed to launch ${job.label} (${job.name}).`);
     } else {
       usedPlanned = ns.getServerUsedRam("home"); // sync actual
-      const argInfo = job.args.length ? ` ${JSON.stringify(job.args)}` : "";
-      ns.tprint(`▶️ Started ${job.label} (pid ${pid})${argInfo}`);
+      const argInfo = job.args && job.args.length ? ` ${JSON.stringify(job.args)}` : "";
+      ns.tprint(`Started ${job.label} (pid ${pid})${argInfo}`);
     }
   }
 
@@ -571,16 +580,52 @@ export async function main(ns) {
   if (ns.fileExists("botnet/botnet-hgw-status.js", "home")) {
     const pid = ns.exec("botnet/botnet-hgw-status.js", "home", 1);
     if (pid === 0) {
-      ns.tprint("❌ Failed to launch BOTNET STATUS after deployment delay.");
+      ns.tprint("Failed to launch BOTNET STATUS after deployment delay.");
     } else {
-      ns.tprint(`▶️ Started BOTNET STATUS (pid ${pid}) after deployment delay.`);
+      ns.tprint(`Started BOTNET STATUS (pid ${pid}) after deployment delay.`);
     }
   } else {
-    ns.tprint("⚠️ BOTNET STATUS script not found on home.");
+    ns.tprint("BOTNET STATUS script not found on home.");
   }
 
   ns.tprint(
-    `🎉 STARTUP-HOME COMPLETE — automation online. ` +
-      `Home RAM: ${maxRam.toFixed(1)}GB, reserve: ${HOME_RAM_RESERVE.toFixed(1)}GB.`,
+    "STARTUP-HOME COMPLETE — automation online. " +
+    `Home RAM: ${maxRam.toFixed(1)}GB, reserve: ${HOME_RAM_RESERVE.toFixed(1)}GB.`
   );
+}
+
+// --------------------------------------------------
+// Help Function
+// --------------------------------------------------
+
+function printHelp(ns) {
+  ns.tprint("core/startup-home-advanced.js");
+  ns.tprint("");
+  ns.tprint("Description");
+  ns.tprint("  Advanced home startup/launcher.");
+  ns.tprint("  Picks a batch target, chooses an HGW target for XP or money,");
+  ns.tprint("  kills existing scripts on home (except itself and corp/agri-* helpers),");
+  ns.tprint("  and launches:");
+  ns.tprint("    - core/timed-net-batcher2.js");
+  ns.tprint("    - core/root-and-deploy.js");
+  ns.tprint("    - pserv/pserv-manager.js");
+  ns.tprint("    - botnet/botnet-hgw-sync.js");
+  ns.tprint("    - hacknet/hacknet-smart.js (if present)");
+  ns.tprint("    - optional UI/monitor scripts such as ui/ops-dashboard.js");
+  ns.tprint("");
+  ns.tprint("Notes");
+  ns.tprint("  - Safe to rerun; it will re-kill and restart your core automation.");
+  ns.tprint("  - Uses Formulas.exe automatically when present for target scoring.");
+  ns.tprint("  - Auto-enables timed-net-batcher2 --lowram mode on very small setups.");
+  ns.tprint("  - HGW mode controls the secondary HGW target:");
+  ns.tprint("      --hgw money  => distinct money server, separate from batch target");
+  ns.tprint("      --hgw xp     => high-security XP target.");
+  ns.tprint("  - Preserves corp/agri-structure.js, corp/agri-inputs.js, corp/agri-sales.js.");
+  ns.tprint("");
+  ns.tprint("Syntax");
+  ns.tprint("  run core/startup-home-advanced.js");
+  ns.tprint("  run core/startup-home-advanced.js omega-net");
+  ns.tprint("  run core/startup-home-advanced.js --hgw xp");
+  ns.tprint("  run core/startup-home-advanced.js omega-net --hgw money");
+  ns.tprint("  run core/startup-home-advanced.js --help");
 }

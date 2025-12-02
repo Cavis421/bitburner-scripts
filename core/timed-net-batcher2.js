@@ -1,25 +1,20 @@
-// ⚙️ Global health thresholds (more relaxed)
-const MONEY_THRESHOLD = 0.90;  // Accept 95%+ money (normal mode)
-const SEC_TOLERANCE   = 0.75;   // Allow up to +0.5 sec above min
+// Global health thresholds (more relaxed)
+const MONEY_THRESHOLD = 0.90;  // Accept 90%+ money in normal mode
+const SEC_TOLERANCE   = 0.75;  // Allow some security above min
 
-// Softer thresholds for low-RAM mode (still looser)
+// Softer thresholds for low-RAM mode
 const LOWRAM_MONEY_THRESHOLD = 0.90; // Accept 90%+ money
-const LOWRAM_SEC_TOLERANCE   = 1.50; // Accept up to +1.5 sec above min
-
+const LOWRAM_SEC_TOLERANCE   = 1.50; // Allow more security drift
 
 // Interval for status + profit summaries
 const STATUS_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
-
 // Each batch will only try to use this fraction of *currently free* RAM.
-// This leaves space for overlapping batches and avoids "one huge batch" behavior.
+// This leaves space for overlapping batches and avoids "one huge batch".
 const BATCH_RAM_FRACTION = 0.6;  // 60% of free RAM per batch
-
 
 // Simple formatter wrapper for money values
 function fmtMoney(ns, value) {
-    // 2 decimal places, suffixes from 1k and up
-    // formatNumber(value, fractionalDigits = 2, suffixStart = 1000)
     return "$" + ns.formatNumber(value, 2, 1e3);
 }
 
@@ -80,22 +75,80 @@ function getHackGrowWeakenTimes(ns, target) {
     };
 }
 
+// ------------------------------------------------
+// HELP
+// ------------------------------------------------
+
+function printHelp(ns) {
+    const script = "core/timed-net-batcher2.js";
+
+    ns.tprint("==============================================================");
+    ns.tprint(`HELP — ${script}`);
+    ns.tprint("==============================================================");
+    ns.tprint("");
+
+    ns.tprint("DESCRIPTION");
+    ns.tprint("  Advanced timed HWGW batch controller that:");
+    ns.tprint("    - Uses Formulas.exe when available for precise timings,");
+    ns.tprint("    - Runs multi-batch pipelines in normal mode,");
+    ns.tprint("    - Falls back to a simpler single-batch loop in low-RAM mode,");
+    ns.tprint("    - Uses pservs for grow/weaken and home for hacks when possible,");
+    ns.tprint("    - Falls back to home-only HWGW when you have no pservs.");
+    ns.tprint("");
+
+    ns.tprint("NOTES");
+    ns.tprint("  - Requires batch/batch-hack.js, batch/batch-grow.js,");
+    ns.tprint("    and batch/batch-weaken.js on home.");
+    ns.tprint("  - Expects the target to be rooted and reasonably prepped.");
+    ns.tprint("  - --lowram:");
+    ns.tprint("      * Enables single-batch mode (no overlapping batches),");
+    ns.tprint("      * Uses softer money/security thresholds when prepping.");
+    ns.tprint("  - Normal mode aims for multiple overlapping batches with stricter");
+    ns.tprint("    money/security thresholds.");
+    ns.tprint("");
+
+    ns.tprint("SYNTAX");
+    ns.tprint("  run core/timed-net-batcher2.js <target>");
+    ns.tprint("  run core/timed-net-batcher2.js <target> --lowram");
+    ns.tprint("  run core/timed-net-batcher2.js --help");
+    ns.tprint("");
+
+    ns.tprint("==============================================================");
+    ns.tprint("");
+}
+
+// ------------------------------------------------
+// MAIN
+// ------------------------------------------------
+
 /** @param {NS} ns */
 export async function main(ns) {
     ns.disableLog("ALL");
 
-    // Use flags so we can support --lowram
+    // Use flags so we can support --lowram and --help
     const flags = ns.flags([
         ["lowram", false],
+        ["help", false],
     ]);
+
+    if (flags.help) {
+        printHelp(ns);
+        return;
+    }
 
     const target = flags._[0];
     const lowRamMode = !!flags.lowram;
 
     if (!target) {
-        ns.tprint("? No batch target provided! (core/timed-net-batcher2.js needs one)");
-        ns.tprint("   Example: run core/timed-net-batcher2.js n00dles");
-        ns.tprint("   Or:      run core/timed-net-batcher2.js n00dles --lowram");
+        ns.tprint("No batch target provided. core/timed-net-batcher2.js requires a target.");
+        ns.tprint("");
+        ns.tprint("Syntax");
+        ns.tprint("  run core/timed-net-batcher2.js <target>");
+        ns.tprint("  run core/timed-net-batcher2.js <target> --lowram");
+        ns.tprint("");
+        ns.tprint("Examples");
+        ns.tprint("  run core/timed-net-batcher2.js n00dles");
+        ns.tprint("  run core/timed-net-batcher2.js omega-net --lowram");
         return;
     }
 
@@ -105,7 +158,7 @@ export async function main(ns) {
 
     for (const s of [hackScript, growScript, weakenScript]) {
         if (!ns.fileExists(s, "home")) {
-            ns.tprint(`? Missing script on home: ${s}`);
+            ns.tprint(`Missing script on home: ${s}`);
             return;
         }
     }
@@ -113,9 +166,10 @@ export async function main(ns) {
     const purchased = ns.getPurchasedServers();
     const hasPservs = purchased.length > 0;
 
+    // If no pservs, fall back to a classic home-only HWGW loop
     if (!hasPservs) {
-        ns.tprint("💻 No purchased servers found. Using HOME for full HWGW batches.");
-        await runAllOnHome(ns, target, hackScript, growScript, weakenScript, lowRamMode);
+        ns.tprint("No purchased servers found. Using HOME for full HWGW batches.");
+        await runAllOnHome(ns, target, hackScript, growScript, weakenScript);
         return;
     }
 
@@ -126,18 +180,18 @@ export async function main(ns) {
 
     const { tHack, tGrow, tWeaken, usingFormulas } = getHackGrowWeakenTimes(ns, target);
 
-    ns.tprint(`🎯 Multi-batch HYBRID batcher targeting: ${target}`);
-    ns.tprint(`🏠 HOME: hack only  |  🖥️ PSERVs: grow + weaken`);
+    ns.tprint(`Multi-batch HYBRID batcher targeting: ${target}`);
+    ns.tprint("HOME: hack only  |  PSERVs: grow + weaken");
     ns.tprint(
         usingFormulas
-            ? "ℹ️ Using Formulas.exe for batch timing."
-            : "ℹ️ Formulas.exe not detected – using ns.getHack/Grow/WeakenTime."
+            ? "Using Formulas.exe for batch timing."
+            : "Formulas.exe not detected; using ns.getHack/Grow/WeakenTime."
     );
 
     if (lowRamMode) {
-        ns.tprint("🩳 LOW-RAM MODE ENABLED: single batch at a time, softer prep thresholds.");
+        ns.tprint("LOW-RAM MODE: single batch at a time with softer prep thresholds.");
     } else {
-        ns.tprint("🧪 NORMAL MODE: multi-batch pipeline with strict prep thresholds.");
+        ns.tprint("NORMAL MODE: multi-batch pipeline with stricter prep thresholds.");
     }
 
     // -- Timing setup -------------------------------------
@@ -155,352 +209,235 @@ export async function main(ns) {
     const delayWeak1  = Math.max(0, T - 1 * GAP - tWeaken);
     const delayWeak2  = Math.max(0, T          - tWeaken);
 
-    ns.tprint(`⏱ Times (sec): H=${(tHack/1000).toFixed(1)}, G=${(tGrow/1000).toFixed(1)}, W=${(tWeaken/1000).toFixed(1)}`);
-    ns.tprint(`⏱ Delays (sec): H=${(delayHack/1000).toFixed(1)}, G=${(delayGrow/1000).toFixed(1)}, W1=${(delayWeak1/1000).toFixed(1)}, W2=${(delayWeak2/1000).toFixed(1)}`);
-    ns.tprint(`🔁 Base cycleTime: ${ns.tFormat(cycleTime)} (concurrency=${DESIRED_CONCURRENCY})`);
-    ns.tprint(`🚀 Launch interval: ${ns.tFormat(batchInterval)} per batch`);
-
-    const basePlan = calcBaseThreads(ns, target);
-    if (!basePlan) {
-        ns.tprint("? Failed to compute base batch plan.");
-        return;
-    }
-
-    const hackRam   = ns.getScriptRam(hackScript);
-    const growRam   = ns.getScriptRam(growScript);
-    const weakenRam = ns.getScriptRam(weakenScript);
+    ns.tprint(
+        `Times (sec): H=${(tHack / 1000).toFixed(1)}, ` +
+        `G=${(tGrow / 1000).toFixed(1)}, W=${(tWeaken / 1000).toFixed(1)}`
+    );
+    ns.tprint(
+        `Delays (sec): H=${(delayHack / 1000).toFixed(1)}, ` +
+        `G=${(delayGrow / 1000).toFixed(1)}, ` +
+        `W1=${(delayWeak1 / 1000).toFixed(1)}, W2=${(delayWeak2 / 1000).toFixed(1)}`
+    );
+    ns.tprint(
+        `Base cycleTime: ${ns.tFormat(cycleTime)} (aiming for ${DESIRED_CONCURRENCY} overlapping batches)`
+    );
+    ns.tprint(`Launch interval: ${ns.tFormat(batchInterval)} per batch`);
 
     const HOME_RAM_RESERVE = getHomeReserve(ns);
-
-    // In low-RAM mode, hack a smaller fraction per batch to keep things lighter.
-    const MAX_HACK_FRACTION = lowRamMode ? 0.50 : 0.90;   // <= 50% vs 90% of money in one wave
-
-    // Softer prep thresholds in low-RAM mode
-    const moneyThreshold = lowRamMode ? LOWRAM_MONEY_THRESHOLD : MONEY_THRESHOLD;
-    const secTolerance   = lowRamMode ? LOWRAM_SEC_TOLERANCE   : SEC_TOLERANCE;
-
     let lastStatusPrint = 0;
-
-    // 📈 Throughput tracking (hybrid mode)
-    let cumulativeBatchMoney = 0;
-    let batchCount = 0;
-    const startTime = Date.now();
-    let rollingStart = startTime;
-    let rollingMoney = 0;
-    let rollingBatches = 0;
 
     while (true) {
         const now = Date.now();
-
-        // 🩺 HEALTHCHECK & PREP (before launching any new batch)
-        await ensurePrepped(
-            ns,
-            target,
-            purchased,
-            growScript,
-            weakenScript,
-            HOME_RAM_RESERVE,
-            moneyThreshold,
-            secTolerance
-        );
-
-        // -- Periodic target + profit summary (every STATUS_INTERVAL) ---
         if (now - lastStatusPrint >= STATUS_INTERVAL) {
             printTargetStatus(ns, target);
-
-            // Heartbeat: always hits console, even if no batches yet
-            const runtimeMs = Date.now() - startTime;
-            const runtimeSec = runtimeMs / 1000;
-            const avgPerSecHeartbeat =
-                runtimeSec > 0 ? cumulativeBatchMoney / runtimeSec : 0;
-            const avgPerHourHeartbeat = avgPerSecHeartbeat * 3600;
-
-            ns.tprint(
-                `⏱ HEARTBEAT – ${target} | runtime=${ns.tFormat(runtimeMs)} | ` +
-                `batches=${batchCount} | est≈${fmtMoney(ns, avgPerHourHeartbeat)}/hr`
-            );
-
-            // GLOBAL lifetime summary (only if we actually launched batches)
-            if (batchCount > 0) {
-                const runtimeSec = (Date.now() - startTime) / 1000;
-                const avgPerSec  = cumulativeBatchMoney / runtimeSec;
-                const avgPerHour = avgPerSec * 3600;
-
-                ns.tprint(
-                    `📈 PROFIT SUMMARY – lifetime\n` +
-                    `    batches launched:   ${batchCount}\n` +
-                    `    est money gained:   ${fmtMoney(ns, cumulativeBatchMoney)}\n` +
-                    `    avg income:         ${fmtMoney(ns, avgPerSec)}/sec ` +
-                    `(${fmtMoney(ns, avgPerHour)}/hr)\n` +
-                    `    runtime:            ${ns.tFormat(runtimeSec * 1000)}`
-                );
-            }
-
-            // Rolling 10-minute (or whatever interval) window
-            const windowSec = (Date.now() - rollingStart) / 1000;
-            if (rollingBatches > 0 && windowSec > 0) {
-                const sliceAvg  = rollingMoney / windowSec;
-                const sliceHour = sliceAvg * 3600;
-
-                ns.tprint(
-                    `🕒 PROFIT (last ${ns.tFormat(windowSec * 1000)}):\n` +
-                    `    batches:            ${rollingBatches}\n` +
-                    `    money gained:       ${fmtMoney(ns, rollingMoney)}\n` +
-                    `    avg income:         ${fmtMoney(ns, sliceAvg)}/sec ` +
-                    `(${fmtMoney(ns, sliceHour)}/hr)`
-                );
-            }
-
-            // reset rolling window
-            rollingStart   = Date.now();
-            rollingMoney   = 0;
-            rollingBatches = 0;
-
             lastStatusPrint = now;
         }
 
-        // -- RAM snapshot -----------------------------------
-        const homeMax  = ns.getServerMaxRam("home");
-        const homeUsed = ns.getServerUsedRam("home");
-        let homeFree   = homeMax - homeUsed - HOME_RAM_RESERVE;
-        if (homeFree < 0) homeFree = 0;
+        // Collect worker hosts: home + pservs (others optional)
+        const hosts = getAllServers(ns)
+            .filter(h => ns.hasRootAccess(h) && ns.getServerMaxRam(h) > 0);
 
-        const pservHosts = [];
-        let totalPservFree = 0;
-        for (const h of purchased) {
-            const maxRam  = ns.getServerMaxRam(h);
-            const usedRam = ns.getServerUsedRam(h);
-            const freeRam = Math.max(0, maxRam - usedRam);
-            if (freeRam > 0) {
-                pservHosts.push({ host: h, freeRam });
-                totalPservFree += freeRam;
+        const pservSet = new Set(purchased);
+
+        // Calculate free RAM, with home reserve
+        const workers = [];
+        let totalFree = 0;
+
+        for (const host of hosts) {
+            const maxRam  = ns.getServerMaxRam(host);
+            const usedRam = ns.getServerUsedRam(host);
+            let freeRam   = maxRam - usedRam;
+
+            if (host === "home") {
+                freeRam = Math.max(0, maxRam - usedRam - HOME_RAM_RESERVE);
+            }
+
+            if (freeRam < 0.1) continue;
+
+            workers.push({ host, freeRam, isHome: host === "home", isPserv: pservSet.has(host) });
+            totalFree += freeRam;
+        }
+
+        if (totalFree <= 0) {
+            ns.print("No free RAM available for a new batch. Sleeping.");
+            await ns.sleep(batchInterval);
+            continue;
+        }
+
+        const allowedRam = totalFree * BATCH_RAM_FRACTION;
+
+        // Target health
+        const money   = ns.getServerMoneyAvailable(target);
+        const max     = ns.getServerMaxMoney(target);
+        const sec     = ns.getServerSecurityLevel(target);
+        const minSec  = ns.getServerMinSecurityLevel(target);
+
+        const moneyRatio = max > 0 ? money / max : 0;
+        const secDelta   = sec - minSec;
+
+        const moneyThresh = lowRamMode ? LOWRAM_MONEY_THRESHOLD : MONEY_THRESHOLD;
+        const secThresh   = lowRamMode ? LOWRAM_SEC_TOLERANCE   : SEC_TOLERANCE;
+
+        const moneyOk = moneyRatio >= moneyThresh;
+        const secOk   = secDelta <= secThresh;
+
+        // Decide whether to run a money batch or a prep batch
+        const prepping = !(moneyOk && secOk);
+
+        // Base threads
+        const hackRam   = ns.getScriptRam(hackScript);
+        const growRam   = ns.getScriptRam(growScript);
+        const weakenRam = ns.getScriptRam(weakenScript);
+
+        let hackThreads = 0;
+        let growThreads = 0;
+        let weakenThreads = 0;
+
+        if (!prepping) {
+            // Normal money batch: target ~5% money per batch
+            const pctPerHackThread = ns.hackAnalyze(target);
+            const targetFrac = 0.05;
+            hackThreads = pctPerHackThread > 0 ? Math.floor(targetFrac / pctPerHackThread) : 1;
+            if (hackThreads < 1) hackThreads = 1;
+
+            const growMult = 1 / (1 - targetFrac);
+            growThreads = Math.ceil(ns.growthAnalyze(target, growMult));
+            if (growThreads < 1) growThreads = 1;
+
+            const secIncHack = ns.hackAnalyzeSecurity(hackThreads);
+            const secIncGrow = ns.growthAnalyzeSecurity(growThreads);
+            const totalSec   = secIncHack + secIncGrow;
+            weakenThreads = ns.weakenAnalyze(1) > 0
+                ? Math.ceil(totalSec / ns.weakenAnalyze(1))
+                : 1;
+        } else {
+            // Prep batch: favor grow + weaken
+            // If money is low, bias towards grow; if security is high, bias towards weaken.
+            if (moneyRatio < moneyThresh) {
+                const growMult = max > 0 && money > 0 ? max / Math.max(1, money) : 2;
+                growThreads = Math.max(1, Math.ceil(ns.growthAnalyze(target, growMult)));
+            }
+
+            if (secDelta > 0) {
+                weakenThreads = ns.weakenAnalyze(1) > 0
+                    ? Math.max(1, Math.ceil(secDelta / ns.weakenAnalyze(1)))
+                    : 1;
+            }
+
+            // If for some reason both are zero, do at least some weaken
+            if (growThreads === 0 && weakenThreads === 0) {
+                weakenThreads = 1;
             }
         }
 
-        if (homeFree < hackRam || totalPservFree < (growRam + 2 * weakenRam)) {
-            ns.print("⚠️ Not enough RAM (home or pservs) for even a minimal hybrid batch. Retrying...");
-            await ns.sleep(batchInterval);
-            continue;
-        }
-
-        // -- Scale threads with hybrid constraints ---------
-        const {
-            hackThreads,
-            growThreads,
-            weaken1Threads,
-            weaken2Threads
-        } = scaleHybridBatch(
-            ns,
-            target,
-            basePlan,
-            homeFree,
-            totalPservFree,
-            hackRam,
-            growRam,
-            weakenRam,
-            MAX_HACK_FRACTION
-        );
-
-        // If we can't even support 1 safe hack thread, bail for this tick
-        if (hackThreads <= 0 || growThreads <= 0 || weaken1Threads <= 0 || weaken2Threads <= 0) {
-            ns.print("⚠️ Not enough effective RAM (home or pservs) for even a tiny hybrid batch. Retrying...");
-            await ns.sleep(batchInterval);
-            continue;
-        }
-
-        const ramHackHome =
-            hackThreads * hackRam;
-        const ramGWOnPservs =
+        // Total RAM needed for this conceptual batch
+        let totalRamNeeded =
+            hackThreads * hackRam +
             growThreads * growRam +
-            (weaken1Threads + weaken2Threads) * weakenRam;
+            weakenThreads * weakenRam * 2; // two weakens
 
-        // 💰 Estimated income metrics (per batch and per second)
-        const maxMoney = ns.getServerMaxMoney(target);
-        const pctPerHackThread = ns.hackAnalyze(target);
-        const rawHackFrac = pctPerHackThread * hackThreads;
-        const hackFrac = Math.min(MAX_HACK_FRACTION, rawHackFrac);
-        const estBatchMoney = maxMoney * hackFrac;
-        const estMoneyPerSec = estBatchMoney / (cycleTime / 1000);
+        // If we do not have enough RAM, scale everything down
+        if (totalRamNeeded > allowedRam && totalRamNeeded > 0) {
+            const scale = allowedRam / totalRamNeeded;
+            if (!prepping) {
+                hackThreads   = Math.max(1, Math.floor(hackThreads * scale));
+                growThreads   = Math.max(1, Math.floor(growThreads * scale));
+                weakenThreads = Math.max(1, Math.floor(weakenThreads * scale));
+            } else {
+                growThreads   = Math.max(1, Math.floor(growThreads * scale));
+                weakenThreads = Math.max(1, Math.floor(weakenThreads * scale));
+            }
 
-        // Update throughput stats
-        cumulativeBatchMoney += estBatchMoney;
-        batchCount++;
-        rollingMoney   += estBatchMoney;
-        rollingBatches += 1;
+            totalRamNeeded =
+                hackThreads * hackRam +
+                growThreads * growRam +
+                weakenThreads * weakenRam * 2;
+        }
 
-        const runtimeSec = (Date.now() - startTime) / 1000;
-        const avgPerSec  = cumulativeBatchMoney / Math.max(runtimeSec, 1);
-        const avgPerHour = avgPerSec * 3600;
+        if (!prepping) {
+            ns.print(
+                `Money batch: H=${hackThreads}, G=${growThreads}, ` +
+                `W1=${weakenThreads}, W2=${weakenThreads} (RAM=${totalRamNeeded.toFixed(1)}GB)`
+            );
+        } else {
+            ns.print(
+                `Prep batch: G=${growThreads}, W=${weakenThreads} (RAM=${totalRamNeeded.toFixed(1)}GB)`
+            );
+        }
 
-        ns.print(
-            `💥 Hybrid batch${lowRamMode ? " [LOWRAM]" : ""}: ` +
-            `H=${hackThreads} (home ${ramHackHome.toFixed(1)}GB), ` +
-            `G=${growThreads}, W1=${weaken1Threads}, W2=${weaken2Threads} ` +
-            `(pserv RAM=${ramGWOnPservs.toFixed(1)}GB) ` +
-            `| 💰 batch≈${fmtMoney(ns, estBatchMoney)} ` +
-            `(~${fmtMoney(ns, estMoneyPerSec)}/sec) ` +
-            `| 📊 avg≈${fmtMoney(ns, avgPerSec)}/sec ` +
-            `(${fmtMoney(ns, avgPerHour)}/hr over ${batchCount} batches)`
-        );
+        // Split hosts into home and non-home (we want hacks on home, grow/weaken elsewhere)
+        const homeHost = workers.find(w => w.isHome);
+        const nonHome  = workers.filter(w => !w.isHome);
 
-        // Rebuild host objects using fresh RAM before allocation
-        const homeHost = {
-            host: "home",
-            freeRam: Math.max(0, ns.getServerMaxRam("home") - ns.getServerUsedRam("home") - HOME_RAM_RESERVE)
-        };
+        if (!homeHost) {
+            ns.print("No usable home RAM found; running everything on non-home servers.");
+        }
 
-        // Shuffle pservs so usage spreads more evenly over time
-        const pservHostObjs = shuffleArray(ns, pservHosts.map(h => ({
-            host: h.host,
-            freeRam: Math.max(0, ns.getServerMaxRam(h.host) - ns.getServerUsedRam(h.host))
-        })).filter(h => h.freeRam > 0));
+        // Schedule weaken1, hack, grow, weaken2 with alignment
+        const weak1Threads = weakenThreads;
+        const weak2Threads = weakenThreads;
 
-        // Landing order: W1 → H → G → W2 (recomputed timings in case difficulty changed)
-        const { tHack: tHackCurrent, tGrow: tGrowCurrent, tWeaken: tWeakenCurrent } = getHackGrowWeakenTimes(ns, target);
+        // Weaken 1 (non-home preferred)
+        allocToHosts(ns, nonHome, weakenScript, target, weak1Threads, delayWeak1);
 
-        const GAP2 = 200;
-        const T2 = tWeakenCurrent + 4 * GAP2;
-        const delayHack2  = Math.max(0, T2 - 3 * GAP2 - tHackCurrent);
-        const delayGrow2  = Math.max(0, T2 - 2 * GAP2 - tGrowCurrent);
-        const delayWeak1b = Math.max(0, T2 - 1 * GAP2 - tWeakenCurrent);
-        const delayWeak2b = Math.max(0, T2          - tWeakenCurrent);
+        // Hacks on home if possible, else on non-home
+        if (!prepping && hackThreads > 0) {
+            if (homeHost && homeHost.freeRam >= hackRam) {
+                allocToHosts(ns, [homeHost], hackScript, target, hackThreads, delayHack, tHack);
+            } else {
+                allocToHosts(ns, nonHome, hackScript, target, hackThreads, delayHack, tHack);
+            }
+        }
 
-        allocToHosts(ns, pservHostObjs, weakenScript, target, weaken1Threads, delayWeak1b);
-        allocToHosts(ns, [homeHost],    hackScript,   target, hackThreads,    delayHack2, tHackCurrent);
-        allocToHosts(ns, pservHostObjs, growScript,   target, growThreads,    delayGrow2);
-        allocToHosts(ns, pservHostObjs, weakenScript, target, weaken2Threads, delayWeak2b);
+        // Grows on non-home
+        if (growThreads > 0) {
+            allocToHosts(ns, nonHome, growScript, target, growThreads, delayGrow, tGrow);
+        }
+
+        // Weaken 2 (non-home)
+        allocToHosts(ns, nonHome, weakenScript, target, weak2Threads, delayWeak2);
 
         await ns.sleep(batchInterval);
     }
 }
 
 // ------------------------------------------------
-// BASE BATCH CALCULATION (per "unit" batch)
+// ALLOCATION HELPERS
 // ------------------------------------------------
 
-function calcBaseThreads(ns, target) {
-    const hackPercentTarget    = 0.02; // 2% per "unit" batch (scaled later)
-    const hackPercentPerThread = ns.hackAnalyze(target);
-    if (hackPercentPerThread <= 0) return null;
+/** @param {NS} ns */
+function getAllServers(ns) {
+    const visited = new Set();
+    const stack = ["home"];
 
-    let hackThreads = Math.floor(hackPercentTarget / hackPercentPerThread);
-    if (hackThreads < 1) hackThreads = 1;
+    while (stack.length > 0) {
+        const host = stack.pop();
+        if (visited.has(host)) continue;
+        visited.add(host);
 
-    const growMultiplier = 1 / (1 - hackPercentTarget);
-    let growThreads = Math.ceil(ns.growthAnalyze(target, growMultiplier));
-    if (growThreads < 1) growThreads = 1;
-
-    const secFromHack = ns.hackAnalyzeSecurity(hackThreads);
-    const secFromGrow = ns.growthAnalyzeSecurity(growThreads);
-    const secTotal    = secFromHack + secFromGrow;
-
-    const weakenPerThread = ns.weakenAnalyze(1);
-    if (weakenPerThread <= 0) return null;
-
-    let weakenThreads = Math.ceil(secTotal / weakenPerThread);
-
-    return {
-        baseHack: hackThreads,
-        baseGrow: growThreads,
-        baseWeak: weakenThreads,
-    };
-}
-
-// ------------------------------------------------
-// HYBRID SCALING: home = hack, pservs = grow+weaken
-// ------------------------------------------------
-
-function scaleHybridBatch(
-    ns,
-    target,
-    base,
-    homeFreeRam,
-    totalPservFreeRam,
-    hackRam,
-    growRam,
-    weakenRam,
-    MAX_HACK_FRACTION
-) {
-    const { baseHack, baseGrow, baseWeak } = base;
-
-    // 🔧 New: only use a fraction of the *currently free* RAM for this batch
-    // so that we can have multiple batches in flight.
-    homeFreeRam       = homeFreeRam * BATCH_RAM_FRACTION;
-    totalPservFreeRam = totalPservFreeRam * BATCH_RAM_FRACTION;
-
-    // Derive ratios per 1 hack thread from the base plan
-    const growPerHack  = baseGrow / baseHack;
-    const weakPerHack  = baseWeak / baseHack;
-
-    // RAM cost per *hack thread* worth of support:
-    const ramPerHackOnHome   = hackRam;
-    const ramPerHackOnPservs =
-        growPerHack * growRam +
-        2 * weakPerHack * weakenRam; // grow + two weakens (W1/W2)
-
-    // If we literally can't support even 1 hack thread's worth of support, bail
-    if (homeFreeRam < ramPerHackOnHome || totalPservFreeRam < ramPerHackOnPservs) {
-        return { hackThreads: 0, growThreads: 0, weaken1Threads: 0, weaken2Threads: 0 };
-    }
-
-    // Limits from RAM
-    const maxHackByHome  = Math.floor(homeFreeRam       / ramPerHackOnHome);
-    const maxHackByPserv = Math.floor(totalPservFreeRam / ramPerHackOnPservs);
-
-    // Limit from money safety (don't over-hack)
-    let maxHackBySafety = Infinity;
-    const pctPerHackThread = ns.hackAnalyze(target);
-    if (pctPerHackThread > 0) {
-        maxHackBySafety = Math.floor(MAX_HACK_FRACTION / pctPerHackThread);
-    }
-
-    let hackThreads = Math.min(maxHackByHome, maxHackByPserv, maxHackBySafety);
-    if (!Number.isFinite(hackThreads) || hackThreads <= 0) {
-        return { hackThreads: 0, growThreads: 0, weaken1Threads: 0, weaken2Threads: 0 };
-    }
-
-    // Round down a bit to be safe
-    hackThreads = Math.max(1, Math.floor(hackThreads));
-
-    // Scale grow/weaken proportionally to hack threads
-    let growThreads    = Math.max(1, Math.round(hackThreads * growPerHack));
-    let weaken1Threads = Math.max(1, Math.round(hackThreads * weakPerHack));
-    let weaken2Threads = Math.max(1, weaken1Threads);
-
-    // Final sanity check: if after rounding we no longer fit, step down once
-    const totalRamHomeNeeded   = hackThreads * hackRam;
-    const totalRamPservsNeeded =
-        growThreads * growRam +
-        (weaken1Threads + weaken2Threads) * weakenRam;
-
-    if (totalRamHomeNeeded > homeFreeRam || totalRamPservsNeeded > totalPservFreeRam) {
-        // Try dropping hackThreads by one step and recompute
-        hackThreads = Math.max(0, hackThreads - 1);
-        if (hackThreads <= 0) {
-            return { hackThreads: 0, growThreads: 0, weaken1Threads: 0, weaken2Threads: 0 };
+        for (const n of ns.scan(host)) {
+            if (!visited.has(n)) stack.push(n);
         }
-
-        growThreads    = Math.max(1, Math.round(hackThreads * growPerHack));
-        weaken1Threads = Math.max(1, Math.round(hackThreads * weakPerHack));
-        weaken2Threads = Math.max(1, weaken1Threads);
     }
-
-    return { hackThreads, growThreads, weaken1Threads, weaken2Threads };
+    return Array.from(visited);
 }
 
-
-// ------------------------------------------------
-// GENERIC ALLOCATION ACROSS HOSTS
-// ------------------------------------------------
-
-function allocToHosts(ns, hosts, script, target, threadsNeeded, delay, extraArg = null) {
+/**
+ * Allocate threads for a given script across a list of hosts.
+ * The batch worker scripts accept:
+ *   - target
+ *   - startDelay (ms)
+ *   - expectedTime (ms) [only for hack/grow]
+ */
+function allocToHosts(ns, hosts, script, target, threadsNeeded, delay = 0, extraArg = null) {
     if (threadsNeeded <= 0) return;
-    if (!hosts || hosts.length === 0) return;
 
     const ramPerThread = ns.getScriptRam(script);
+    if (ramPerThread <= 0) return;
 
     for (const h of hosts) {
         if (threadsNeeded <= 0) break;
+        if (h.freeRam < ramPerThread) continue;
 
         const maxThreadsHere = Math.floor(h.freeRam / ramPerThread);
         if (maxThreadsHere <= 0) continue;
@@ -519,7 +456,7 @@ function allocToHosts(ns, hosts, script, target, threadsNeeded, delay, extraArg 
 }
 
 // ------------------------------------------------
-// STATUS & HELPERS
+// STATUS HELPERS
 // ------------------------------------------------
 
 function printTargetStatus(ns, target) {
@@ -534,15 +471,20 @@ function printTargetStatus(ns, target) {
     const now = new Date();
     const ts = now.toLocaleTimeString();
 
-    // Switched to tprint so status shows in the main terminal every interval
-    ns.tprint("--------------------------------------");
-    ns.tprint(`📊 TARGET STATUS – ${target} @ ${ts}`);
-    ns.tprint(`💰 Money:       ${fmtMoney(ns, money)} / ${fmtMoney(ns, max)} (${moneyPct.toFixed(2)}%)`);
-    ns.tprint(`🛡 Security:    ${sec.toFixed(2)} (min ${minSec.toFixed(2)})  Δ=${secDelta.toFixed(2)}`);
-    ns.tprint("--------------------------------------");
+    ns.print("--------------------------------------");
+    ns.print(`TARGET STATUS — ${target} @ ${ts}`);
+    ns.print(
+        `Money:       ${ns.nFormat(money, "$0.00a")} / ` +
+        `${ns.nFormat(max, "$0.00a")} (${moneyPct.toFixed(2)}%)`
+    );
+    ns.print(
+        `Security:    ${sec.toFixed(2)} (min ${minSec.toFixed(2)})  delta=${secDelta.toFixed(2)}`
+    );
+    ns.print("--------------------------------------");
 }
 
-function shuffleArray(ns, arr) {
+// Simple Fisher–Yates; ns param kept for consistency if you want to log
+function shuffleArray(_ns, arr) {
     for (let i = arr.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         const tmp = arr[i];
@@ -553,299 +495,66 @@ function shuffleArray(ns, arr) {
 }
 
 // ------------------------------------------------
-// 🩺 SERVER HEALTHCHECK + PREP LOGIC
-// ------------------------------------------------
-
-function checkServerHealth(ns, target, moneyThreshold, secTolerance) {
-    const max    = ns.getServerMaxMoney(target);
-    const money  = ns.getServerMoneyAvailable(target);
-    const sec    = ns.getServerSecurityLevel(target);
-    const minSec = ns.getServerMinSecurityLevel(target);
-
-    const moneyPct = max > 0 ? money / max : 0;
-    const moneyOk  = moneyPct >= moneyThreshold;
-    const secOk    = sec <= minSec + secTolerance;
-
-    return {
-        moneyOk,
-        secOk,
-        moneyPct,
-        money,
-        max,
-        sec,
-        minSec
-    };
-}
-
-/**
- * Ensure the target is "prepped" (high money, low security).
- * If not, run prep-only G/W waves using all hosts, then return.
- */
-async function ensurePrepped(
-    ns,
-    target,
-    purchased,
-    growScript,
-    weakenScript,
-    HOME_RAM_RESERVE,
-    moneyThreshold,
-    secTolerance
-) {
-    const GAP = 200; // ms
-
-    while (true) {
-        const { tGrow, tWeaken } = getHackGrowWeakenTimes(ns, target);
-        const h = checkServerHealth(ns, target, moneyThreshold, secTolerance);
-
-        ns.print(
-            `🩺 HEALTHCHECK: ` +
-            `money=${(h.moneyPct * 100).toFixed(2)}% ` +
-            `sec=${h.sec.toFixed(2)} (min=${h.minSec.toFixed(2)})`
-        );
-
-        if (h.moneyOk && h.secOk) {
-            ns.print("✅ HEALTHCHECK: Target prepped. Proceeding with normal batching.");
-            return true;
-        }
-
-        ns.tprint(
-            `🩺 HEALTHCHECK: Target ${target} needs prep ` +
-            `(money ${(h.moneyPct * 100).toFixed(2)}%, sec ${h.sec.toFixed(2)} vs min ${h.minSec.toFixed(2)}).`
-        );
-        ns.tprint("   🔧 Starting prep-only grow+weaken wave...");
-
-        // RAM snapshot across all hosts
-        const growRam   = ns.getScriptRam(growScript);
-        const weakenRam = ns.getScriptRam(weakenScript);
-
-        const homeMax  = ns.getServerMaxRam("home");
-        const homeUsed = ns.getServerUsedRam("home");
-        let homeFree   = homeMax - homeUsed - HOME_RAM_RESERVE;
-        if (homeFree < 0) homeFree = 0;
-
-        const allHosts = [];
-        let totalFree = 0;
-
-        if (homeFree > 0) {
-            allHosts.push({ host: "home", freeRam: homeFree });
-            totalFree += homeFree;
-        }
-
-        for (const p of purchased) {
-            const maxRam  = ns.getServerMaxRam(p);
-            const usedRam = ns.getServerUsedRam(p);
-            const freeRam = Math.max(0, maxRam - usedRam);
-            if (freeRam > 0) {
-                allHosts.push({ host: p, freeRam });
-                totalFree += freeRam;
-            }
-        }
-
-        if (totalFree < growRam + weakenRam) {
-            ns.print("⚠️ Not enough RAM anywhere for even minimal prep wave. Retrying in 1s...");
-            await ns.sleep(1000);
-            continue;
-        }
-
-        // Calculate needed grow/weaken threads
-        let growThreads = 0;
-        if (!h.moneyOk && h.max > 0 && h.money > 0) {
-            const desiredMult = h.max / Math.max(h.money, 1);
-            growThreads = Math.ceil(ns.growthAnalyze(target, desiredMult));
-            if (!Number.isFinite(growThreads) || growThreads < 0) growThreads = 0;
-        }
-
-        let secDelta          = h.sec - h.minSec;
-        let extraSecFromGrow  = growThreads > 0 ? ns.growthAnalyzeSecurity(growThreads) : 0;
-        let totalSecToWeaken  = Math.max(0, secDelta + extraSecFromGrow);
-        let weakenThreads     = totalSecToWeaken > 0 ? Math.ceil(totalSecToWeaken / ns.weakenAnalyze(1)) : 0;
-
-        // Make sure we do *something* if unhealthy
-        if (!h.moneyOk && growThreads === 0)  growThreads = 1;
-        if (!h.secOk   && weakenThreads === 0) weakenThreads = 1;
-
-        let totalRamNeeded =
-            growThreads * growRam +
-            weakenThreads * weakenRam;
-
-        if (totalRamNeeded > totalFree && totalRamNeeded > 0) {
-            const scale = totalFree / totalRamNeeded;
-            growThreads   = Math.floor(growThreads   * scale);
-            weakenThreads = Math.floor(weakenThreads * scale);
-
-            if (growThreads <= 0 && weakenThreads <= 0) {
-                ns.print("⚠️ Prep scaling resulted in 0 threads; waiting 1s and retrying...");
-                await ns.sleep(1000);
-                continue;
-            }
-
-            totalRamNeeded =
-                growThreads * growRam +
-                weakenThreads * weakenRam;
-        }
-
-        const T = tWeaken + 2 * GAP;
-        const delayGrow = growThreads   > 0 ? Math.max(0, T - GAP - tGrow)   : 0;
-        const delayWeak = weakenThreads > 0 ? Math.max(0, T        - tWeaken) : 0;
-
-        ns.print(
-            `🔧 Prep wave: G=${growThreads}, W=${weakenThreads} ` +
-            `(RAM≈${totalRamNeeded.toFixed(1)}GB, duration≈${ns.tFormat(T)})`
-        );
-
-        if (growThreads > 0) {
-            allocToHosts(ns, allHosts, growScript, target, growThreads, delayGrow);
-        }
-        if (weakenThreads > 0) {
-            allocToHosts(ns, allHosts, weakenScript, target, weakenThreads, delayWeak);
-        }
-
-        // Wait for prep wave to land before evaluating again
-        await ns.sleep(T + 200);
-    }
-}
-
-// ------------------------------------------------
 // FALLBACK: classic full HWGW on home only
 // ------------------------------------------------
 
-async function runAllOnHome(ns, target, hackScript, growScript, weakenScript, lowRamMode) {
-    const { tHack, tGrow, tWeaken, usingFormulas } = getHackGrowWeakenTimes(ns, target);
+async function runAllOnHome(ns, target, hackScript, growScript, weakenScript) {
+    const tHack   = ns.getHackTime(target);
+    const tGrow   = ns.getGrowTime(target);
+    const tWeaken = ns.getWeakenTime(target);
 
     const GAP = 200; // ms
     const T = tWeaken + 4 * GAP;
-
-    // Concurrency: 8 in normal mode, 1 in low-RAM mode
-    const DESIRED_CONCURRENCY = lowRamMode ? 1 : 8;
-
-    const cycleTime     = T + GAP;
-    const batchInterval = Math.max(GAP, Math.floor(cycleTime / DESIRED_CONCURRENCY));
 
     const delayHack   = Math.max(0, T - 3 * GAP - tHack);
     const delayGrow   = Math.max(0, T - 2 * GAP - tGrow);
     const delayWeak1  = Math.max(0, T - 1 * GAP - tWeaken);
     const delayWeak2  = Math.max(0, T          - tWeaken);
 
-    ns.tprint(`⏱ Times (sec): H=${(tHack/1000).toFixed(1)}, G=${(tGrow/1000).toFixed(1)}, W=${(tWeaken/1000).toFixed(1)}`);
-    ns.tprint(`⏱ Delays (sec): H=${(delayHack/1000).toFixed(1)}, G=${(delayGrow/1000).toFixed(1)}, W1=${(delayWeak1/1000).toFixed(1)}, W2=${(delayWeak2/1000).toFixed(1)}`);
-    ns.tprint(`🔁 Base cycleTime: ${ns.tFormat(cycleTime)} (concurrency=${DESIRED_CONCURRENCY})`);
+    const cycleTime = T + GAP;
+    const DESIRED_CONCURRENCY = 8;
+    const batchInterval = Math.max(GAP, Math.floor(cycleTime / DESIRED_CONCURRENCY));
+
     ns.tprint(
-        usingFormulas
-            ? `🏠 Single-host mode: HOME running full HWGW (${lowRamMode ? "LOW-RAM" : "NORMAL"} / Formulas.exe timing).`
-            : `🏠 Single-host mode: HOME running full HWGW (${lowRamMode ? "LOW-RAM" : "NORMAL"} / built-in timing).`
+        `Times (sec): H=${(tHack / 1000).toFixed(1)}, ` +
+        `G=${(tGrow / 1000).toFixed(1)}, W=${(tWeaken / 1000).toFixed(1)}`
     );
-
-    const basePlan = calcBaseThreads(ns, target);
-    if (!basePlan) {
-        ns.tprint("? Failed to compute base batch plan.");
-        return;
-    }
-
-    const hackRam   = ns.getScriptRam(hackScript);
-    const growRam   = ns.getScriptRam(growScript);
-    const weakenRam = ns.getScriptRam(weakenScript);
-
-    const minRamNeeded =
-        hackRam + growRam + (2 * weakenRam);
+    ns.tprint(
+        `Delays (sec): H=${(delayHack / 1000).toFixed(1)}, ` +
+        `G=${(delayGrow / 1000).toFixed(1)}, ` +
+        `W1=${(delayWeak1 / 1000).toFixed(1)}, W2=${(delayWeak2 / 1000).toFixed(1)}`
+    );
+    ns.tprint(
+        `Base cycleTime: ${ns.tFormat(cycleTime)} (aiming for ${DESIRED_CONCURRENCY} overlapping batches)`
+    );
+    ns.tprint(`Launch interval: ${ns.tFormat(batchInterval)} per batch`);
 
     const HOME_RAM_RESERVE = getHomeReserve(ns);
 
-    const MAX_HACK_FRACTION = lowRamMode ? 0.50 : 0.90;
-    const moneyThreshold    = lowRamMode ? LOWRAM_MONEY_THRESHOLD : MONEY_THRESHOLD;
-    const secTolerance      = lowRamMode ? LOWRAM_SEC_TOLERANCE   : SEC_TOLERANCE;
-
-    // 📈 Throughput tracking (home-only mode)
-    let cumulativeBatchMoney = 0;
-    let batchCount = 0;
-    const startTime = Date.now();
-    let rollingStart = startTime;
-    let rollingMoney = 0;
-    let rollingBatches = 0;
-    let lastStatusPrint = 0;
-
     while (true) {
-        // Even in home-only mode, ensure target is prepped with mode-appropriate thresholds
-        await ensurePrepped(
-            ns,
-            target,
-            [],               // no pservs
-            growScript,
-            weakenScript,
-            HOME_RAM_RESERVE,
-            moneyThreshold,
-            secTolerance
-        );
-
-        const now = Date.now();
-
-        // Periodic target + profit summary
-        if (now - lastStatusPrint >= STATUS_INTERVAL) {
-            printTargetStatus(ns, target);
-
-            // Heartbeat: always hits console, even if no batches yet
-            const runtimeMs = Date.now() - startTime;
-            const runtimeSec = runtimeMs / 1000;
-            const avgPerSecHeartbeat =
-                runtimeSec > 0 ? cumulativeBatchMoney / runtimeSec : 0;
-            const avgPerHourHeartbeat = avgPerSecHeartbeat * 3600;
-
-            ns.tprint(
-                `⏱ HEARTBEAT – ${target} [HOME-ONLY] | runtime=${ns.tFormat(runtimeMs)} | ` +
-                `batches=${batchCount} | est≈${fmtMoney(ns, avgPerHourHeartbeat)}/hr`
-            );
-
-            if (batchCount > 0) {
-                const runtimeSec = (Date.now() - startTime) / 1000;
-                const avgPerSec  = cumulativeBatchMoney / runtimeSec;
-                const avgPerHour = avgPerSec * 3600;
-
-                ns.tprint(
-                    `📈 PROFIT SUMMARY – lifetime\n` +
-                    `    batches launched:   ${batchCount}\n` +
-                    `    est money gained:   ${fmtMoney(ns, cumulativeBatchMoney)}\n` +
-                    `    avg income:         ${fmtMoney(ns, avgPerSec)}/sec ` +
-                    `(${fmtMoney(ns, avgPerHour)}/hr)\n` +
-                    `    runtime:            ${ns.tFormat(runtimeSec * 1000)}`
-                );
-            }
-
-            const windowSec = (Date.now() - rollingStart) / 1000;
-            if (rollingBatches > 0 && windowSec > 0) {
-                const sliceAvg  = rollingMoney / windowSec;
-                const sliceHour = sliceAvg * 3600;
-
-                ns.tprint(
-                    `🕒 PROFIT (last ${ns.tFormat(windowSec * 1000)}):\n` +
-                    `    batches:            ${rollingBatches}\n` +
-                    `    money gained:       ${fmtMoney(ns, rollingMoney)}\n` +
-                    `    avg income:         ${fmtMoney(ns, sliceAvg)}/sec ` +
-                    `(${fmtMoney(ns, sliceHour)}/hr)`
-                );
-            }
-
-            rollingStart   = Date.now();
-            rollingMoney   = 0;
-            rollingBatches = 0;
-            lastStatusPrint = now;
-        }
-
         const maxRam  = ns.getServerMaxRam("home");
         const usedRam = ns.getServerUsedRam("home");
         let freeRam   = maxRam - usedRam - HOME_RAM_RESERVE;
         if (freeRam < 0) freeRam = 0;
 
-        if (freeRam < minRamNeeded) {
-            ns.print("⚠️ Insufficient RAM on home for even 1 minimal batch. Retrying...");
+        if (freeRam < 1) {
+            ns.print("Home-only mode: no free RAM available. Sleeping.");
             await ns.sleep(batchInterval);
             continue;
         }
 
-        const { baseHack, baseGrow, baseWeak } = basePlan;
+        const hackRam   = ns.getScriptRam(hackScript);
+        const growRam   = ns.getScriptRam(growScript);
+        const weakenRam = ns.getScriptRam(weakenScript);
+
+        const baseHack = 2;
+        const baseGrow = 4;
+        const baseWeak = 4;
 
         const ramBase =
             baseHack * hackRam +
             baseGrow * growRam +
-            (2 * baseWeak) * weakenRam;
+            2 * baseWeak * weakenRam;
 
         let mult = Math.floor(freeRam / ramBase);
         if (mult < 1) mult = 1;
@@ -853,6 +562,7 @@ async function runAllOnHome(ns, target, hackScript, growScript, weakenScript, lo
         const pctPerHackThread = ns.hackAnalyze(target);
         const basePct          = baseHack * pctPerHackThread;
 
+        const MAX_HACK_FRACTION = 0.9;
         if (basePct > 0) {
             const safeMult = Math.floor(MAX_HACK_FRACTION / basePct);
             if (safeMult > 0 && safeMult < mult) mult = safeMult;
@@ -868,38 +578,18 @@ async function runAllOnHome(ns, target, hackScript, growScript, weakenScript, lo
             growThreads * growRam +
             (weaken1Threads + weaken2Threads) * weakenRam;
 
-        const maxMoney = ns.getServerMaxMoney(target);
-        const rawHackFrac = pctPerHackThread * hackThreads;
-        const hackFrac = Math.min(MAX_HACK_FRACTION, rawHackFrac);
-        const estBatchMoney = maxMoney * hackFrac;
-        const estMoneyPerSec = estBatchMoney / (cycleTime / 1000);
-
-        // Update throughput stats
-        cumulativeBatchMoney += estBatchMoney;
-        batchCount++;
-        rollingMoney   += estBatchMoney;
-        rollingBatches += 1;
-
-        const runtimeSec = (Date.now() - startTime) / 1000;
-        const avgPerSec  = cumulativeBatchMoney / Math.max(runtimeSec, 1);
-        const avgPerHour = avgPerSec * 3600;
-
         ns.print(
-            `💥 Home batch${lowRamMode ? " [LOWRAM]" : ""}: ` +
+            "Home batch: " +
             `H=${hackThreads}, G=${growThreads}, ` +
             `W1=${weaken1Threads}, W2=${weaken2Threads} ` +
-            `(RAM=${ramUsed.toFixed(1)}GB) ` +
-            `| 💰 batch≈${fmtMoney(ns, estBatchMoney)} ` +
-            `(~${fmtMoney(ns, estMoneyPerSec)}/sec) ` +
-            `| 📊 avg≈${fmtMoney(ns, avgPerSec)}/sec ` +
-            `(${fmtMoney(ns, avgPerHour)}/hr over ${batchCount} batches)`
+            `(RAM=${ramUsed.toFixed(1)}GB)`
         );
 
         const host = { host: "home", freeRam };
 
         allocToHosts(ns, [host], weakenScript, target, weaken1Threads, delayWeak1);
         allocToHosts(ns, [host], hackScript,   target, hackThreads,    delayHack, tHack);
-        allocToHosts(ns, [host], growScript,   target, growThreads,    delayGrow);
+        allocToHosts(ns, [host], growScript,   target, growThreads,    delayGrow, tGrow);
         allocToHosts(ns, [host], weakenScript, target, weaken2Threads, delayWeak2);
 
         await ns.sleep(batchInterval);

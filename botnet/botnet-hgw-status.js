@@ -1,5 +1,16 @@
 /** @param {NS} ns */
 export async function main(ns) {
+    // Use flags so we can support --help without breaking positional args
+    const flags = ns.flags([
+        ["help", false], // standard help flag
+    ]);
+
+    // If --help is passed, print help text and exit before any normal logic
+    if (flags.help) {
+        printHelp(ns);
+        return;
+    }
+
     ns.disableLog("ALL");
 
     const workerScript = "botnet/remote-hgw.js";
@@ -8,7 +19,8 @@ export async function main(ns) {
     const allServers = getAllServers(ns);
     const pservs = new Set(ns.getPurchasedServers());
 
-    ns.tprint("??  FULL BOTNET HGW STATUS");
+    // Removed decorative emojis; keep plain, readable headers instead
+    ns.tprint("FULL BOTNET HGW STATUS");
     ns.tprint("------------------------------------------------------------");
     ns.tprint("Server               Type     RAM(GB)   Threads   Target");
     ns.tprint("------------------------------------------------------------");
@@ -42,10 +54,11 @@ export async function main(ns) {
     }
 
     // Sort: by type group first (HOME / PSERV / NPC), then by RAM desc
-    const typeOrder = { "HOME":0, "PSERV":1, "NPC":2 };
+    const typeOrder = { "HOME": 0, "PSERV": 1, "NPC": 2 };
     entries.sort((a, b) => {
-        if (typeOrder[a.type] !== typeOrder[b.type])
+        if (typeOrder[a.type] !== typeOrder[b.type]) {
             return typeOrder[a.type] - typeOrder[b.type];
+        }
         return b.ram - a.ram; // RAM desc
     });
 
@@ -62,6 +75,26 @@ export async function main(ns) {
     ns.tprint("------------------------------------------------------------");
 }
 
+/**
+ * Print script help in a consistent, minimal format.
+ * Uses only ns.tprint and exits before running any main logic.
+ * @param {NS} ns
+ */
+function printHelp(ns) {
+    ns.tprint("botnet/botnet-hgw-status.js");
+    ns.tprint("");
+    ns.tprint("Description");
+    ns.tprint("  Show a snapshot of all botnet HGW workers running on rooted servers.");
+    ns.tprint("  Groups hosts by type and shows RAM, threads, and target for each.");
+    ns.tprint("");
+    ns.tprint("Notes");
+    ns.tprint("  Tracks only processes running botnet/remote-hgw.js on rooted servers.");
+    ns.tprint("  Useful for checking how your HGW swarm is distributed across the network.");
+    ns.tprint("  Does not start, stop, or modify any scripts; it only reports status.");
+    ns.tprint("");
+    ns.tprint("Syntax");
+    ns.tprint("  run botnet/botnet-hgw-status.js [arguments] [--help]");
+}
 
 // --- Breadth-first server discovery ---
 function getAllServers(ns) {

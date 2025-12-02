@@ -14,6 +14,7 @@ settings.json
 Bitburner_Master_Codebase_v2.md 
 Bitburner_Master_Codebase_v3.md
 current_time.txt
+project-instructions.md 
 
 # If using the deprecated VSCode extension:
 # .bitburner/ holds auth tokens & local config
