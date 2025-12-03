@@ -164,14 +164,23 @@ export async function main(ns) {
     }
 
     const purchased = ns.getPurchasedServers();
-    const hasPservs = purchased.length > 0;
+    let totalPservRam = 0;
+    for (const host of purchased) {
+        totalPservRam += ns.getServerMaxRam(host);
+    }
 
-    // If no pservs, fall back to a classic home-only HWGW loop
-    if (!hasPservs) {
-        ns.tprint("No purchased servers found. Using HOME for full HWGW batches.");
+
+    // If we have no meaningful pserv fleet yet, just use HOME for full HWGW batches.
+    // This avoids under-utilizing home when you only have a tiny pserv or two.
+    if (totalPservRam < 64) {
+        ns.tprint(
+            `Pserv fleet too small (${totalPservRam.toFixed(1)}GB). ` +
+            "Using HOME for full HWGW batches."
+        );
         await runAllOnHome(ns, target, hackScript, growScript, weakenScript);
         return;
     }
+
 
     // Make sure pservs have the batch scripts
     for (const host of purchased) {
