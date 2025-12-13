@@ -14,7 +14,17 @@
 export async function main(ns) {
     ns.disableLog("ALL");
 
-    const argTarget = ns.args[0];
+    // Support --help without changing positional behavior.
+    const flags = ns.flags([
+        ["help", false],
+    ]);
+
+    if (flags.help) {
+        printHelp(ns);
+        return;
+    }
+
+    const argTarget = flags._[0];
     const xpTarget = argTarget || chooseXpTarget(ns);
 
     if (!ns.fileExists("botnet/remote-hgw.js", "home")) {
@@ -23,16 +33,16 @@ export async function main(ns) {
     }
 
     ns.tprint("===============================================");
-    ns.tprint("?? XP-ALL MODE: FULL BOTNET XP GRIND");
+    ns.tprint("XP-ALL MODE: FULL BOTNET XP GRIND");
     ns.tprint("===============================================");
-    ns.tprint(`?? XP target: ${xpTarget}`);
+    ns.tprint(`XP target: ${xpTarget}`);
 
     if (argTarget) {
-        ns.tprint("?? Using manually provided XP target.");
+        ns.tprint("Using manually provided XP target.");
     } else if (hasFormulas(ns)) {
-        ns.tprint("?? XP target chosen automatically (?? Formulas.exe).");
+        ns.tprint("XP target chosen automatically (Formulas.exe detected).");
     } else {
-        ns.tprint("?? XP target chosen automatically (vanilla heuristic).");
+        ns.tprint("XP target chosen automatically (vanilla heuristic).");
     }
 
     const allServers = getAllServers(ns);
@@ -40,7 +50,7 @@ export async function main(ns) {
     const myPid = ns.pid;
 
     // 1) Clean HOME (but keep this script running)
-    ns.tprint("?? Cleaning home (killing all other scripts)...");
+    ns.tprint("Cleaning home (killing all other scripts)...");
     for (const p of ns.ps("home")) {
         if (p.pid === myPid) continue;
         ns.kill(p.pid);
@@ -51,7 +61,7 @@ export async function main(ns) {
     deployXpWorker(ns, "home", xpTarget, "xp", true);
 
     // 3) Clean and deploy on all rooted servers (pserv + NPC)
-    ns.tprint("?? Cleaning & deploying XP workers to all rooted servers...");
+    ns.tprint("Cleaning & deploying XP workers to all rooted servers...");
     for (const host of allServers) {
         if (host === "home") continue;
         if (host === "darkweb") continue;
@@ -64,9 +74,50 @@ export async function main(ns) {
         deployXpWorker(ns, host, xpTarget, "xp", pservs.has(host));
     }
 
-    ns.tprint("? XP-ALL deployment complete. All rooted servers now grinding XP.");
-    ns.tprint("   Re-run your normal startup script when you're ready to return to money mode.");
+    ns.tprint("XP-ALL deployment complete. All rooted servers now grinding XP.");
+    ns.tprint("Re-run your normal startup script when you're ready to return to money mode.");
 }
+
+// ------------------------------------------------------------
+// Minimal HELP: Description, Notes, Syntax
+// ------------------------------------------------------------
+
+/** @param {NS} ns */
+function printHelp(ns) {
+    const script = "botnet/xp-all.js";
+
+    ns.tprint("==============================================================");
+    ns.tprint(`HELP — ${script}`);
+    ns.tprint("==============================================================");
+    ns.tprint("");
+
+    // DESCRIPTION
+    ns.tprint("DESCRIPTION");
+    ns.tprint("  Hard-switch the entire botnet (home + pservs + NPC servers) into XP mode.");
+    ns.tprint("  Kills all other scripts on rooted servers and redeploys botnet/remote-hgw.js");
+    ns.tprint("  in XP mode against a single chosen XP target.");
+    ns.tprint("");
+
+    // NOTES
+    ns.tprint("NOTES");
+    ns.tprint("  - Requires botnet/remote-hgw.js to exist on home.");
+    ns.tprint("  - Automatically picks an XP-optimized target if none is given, using");
+    ns.tprint("    Formulas.exe when available or a vanilla heuristic otherwise.");
+    ns.tprint("  - This is a destructive switch: it will kill existing workloads on all");
+    ns.tprint("    rooted servers (home, pservs, and NPCs) before redeploying XP workers.");
+    ns.tprint("  - To return to normal money mode, re-run your main startup script afterward.");
+    ns.tprint("");
+
+    // SYNTAX
+    ns.tprint("SYNTAX");
+    ns.tprint("  run botnet/xp-all.js");
+    ns.tprint("  run botnet/xp-all.js <xp-target>");
+    ns.tprint("  run botnet/xp-all.js --help");
+}
+
+// ------------------------------------------------------------
+// Internal helpers
+// ------------------------------------------------------------
 
 /** @param {NS} ns */
 function hasFormulas(ns) {
@@ -92,7 +143,7 @@ function hasFormulas(ns) {
 function deployXpWorker(ns, host, target, mode, isPserv = false) {
     const maxRam = ns.getServerMaxRam(host);
     if (maxRam < 2) {
-        ns.print(`?? Skipping ${host}: only ${maxRam}GB RAM`);
+        ns.print(`Skipping ${host}: only ${maxRam}GB RAM`);
         return;
     }
 
@@ -100,14 +151,14 @@ function deployXpWorker(ns, host, target, mode, isPserv = false) {
     if (host !== "home") {
         const ok = ns.scp("botnet/remote-hgw.js", host, "home");
         if (!ok) {
-            ns.tprint(`?? Failed to SCP botnet/remote-hgw.js to ${host}`);
+            ns.tprint(`Failed to SCP botnet/remote-hgw.js to ${host}`);
             return;
         }
     }
 
     const scriptRam = ns.getScriptRam("botnet/remote-hgw.js", host);
     if (scriptRam === 0) {
-        ns.tprint(`?? botnet/remote-hgw.js has 0 RAM cost on ${host} (missing or miscompiled?).`);
+        ns.tprint(`botnet/remote-hgw.js has 0 RAM cost on ${host} (missing or miscompiled?).`);
         return;
     }
 
@@ -120,13 +171,13 @@ function deployXpWorker(ns, host, target, mode, isPserv = false) {
 
     const threads = Math.floor(usableRam / scriptRam);
     if (threads < 1) {
-        ns.print(`?? ${host}: not enough free RAM for even 1 XP thread.`);
+        ns.print(`${host}: not enough free RAM for even 1 XP thread.`);
         return;
     }
 
     const pid = ns.exec("botnet/remote-hgw.js", host, threads, target, mode);
     if (pid === 0) {
-        ns.tprint(`? Failed to start botnet/remote-hgw.js on ${host}`);
+        ns.tprint(`Failed to start botnet/remote-hgw.js on ${host}`);
         return;
     }
 
@@ -138,7 +189,7 @@ function deployXpWorker(ns, host, target, mode, isPserv = false) {
             : "NPC";
 
     ns.tprint(
-        `?? ${label.padEnd(5)} ${host}: botnet/remote-hgw.js x${threads} ? ` +
+        `${label.padEnd(5)} ${host}: botnet/remote-hgw.js x${threads} -> ` +
         `${target} [${mode.toUpperCase()}]`
     );
 }
@@ -163,25 +214,29 @@ function chooseXpTarget(ns) {
     const player = useFormulas ? ns.getPlayer() : null;
 
     for (const host of servers) {
-        if (host === "home" || host === "darkweb") continue;
+        if (host === "home") continue;
+        if (host === "darkweb") continue;
         if (!ns.hasRootAccess(host)) continue;
 
-        const reqHack = ns.getServerRequiredHackingLevel(host);
-        const maxMoney = ns.getServerMaxMoney(host);
+        const s = ns.getServer(host);
+        const maxMoney = s.moneyMax;
+        const reqHack = s.requiredHackingSkill || s.requiredHackingSkill === 0
+            ? s.requiredHackingSkill
+            : ns.getServerRequiredHackingLevel(host);
 
         if (maxMoney <= 0) continue;
         if (reqHack > playerHack) continue;
 
         if (useFormulas) {
-            let s = ns.getServer(host);
-            if (typeof s.minDifficulty === "number") {
-                s.hackDifficulty = s.minDifficulty;
+            let serverClone = ns.getServer(host);
+            if (typeof serverClone.minDifficulty === "number") {
+                serverClone.hackDifficulty = serverClone.minDifficulty;
             }
-            if (typeof s.moneyMax === "number" && s.moneyMax > 0) {
-                s.moneyAvailable = s.moneyMax;
+            if (typeof serverClone.moneyMax === "number" && serverClone.moneyMax > 0) {
+                serverClone.moneyAvailable = serverClone.moneyMax;
             }
 
-            const tWeaken = ns.formulas.hacking.weakenTime(s, player);
+            const tWeaken = ns.formulas.hacking.weakenTime(serverClone, player);
             if (tWeaken <= 0) continue;
 
             // Approximate XP/sec score: higher reqHack and shorter weaken time is better.

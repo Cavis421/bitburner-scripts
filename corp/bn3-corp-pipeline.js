@@ -3,11 +3,11 @@
  *
  * End-to-end BN3 corporation bootstrap:
  *  - Create corp with seed money (BN3 only) if it doesn't exist
- *  - Create Agriculture division, expand to 6 cities, buy warehouses
- *  - Upgrade offices to 4 employees and assign basic jobs
- *  - Start producing + selling Plants and Food in all cities
+ *  - Create Agriculture division, optionally expand to 6 cities, buy warehouses
+ *  - Upgrade offices and assign basic jobs (unless --assign-none)
+ *  - Start producing + selling Food (do NOT sell Plants) in all active cities
  *  - Maintain a simple "Smart Supply" for Water & Chemicals via API
- *  - (Optional) Create Chemical division and wire exports
+ *  - (Optional) Create Chemical division and wire exports (when --chem-support)
  * 
  * This is deliberately conservative:
  *  - No auto IPO, no share tricks, no dividends
@@ -31,6 +31,10 @@ export async function main(ns) {
     ["loop", false],
     // When true, do NOT auto-assign jobs; only create/expand/hire.
     ["assign-none", false],
+    // When true, allow expanding Agri to all 6 cities (otherwise only touch existing cities).
+    ["expand-all", false],
+    // When true, allow creating/maintaining Chemical support division.
+    ["chem-support", false],
   ]);
 
   if (flags.help) {
@@ -52,6 +56,8 @@ export async function main(ns) {
   const CITIES = ["Sector-12", "Aevum", "Volhaven", "Chongqing", "New Tokyo", "Ishima"];
 
   const assignJobs = !flags["assign-none"];
+  const expandAll = !!flags["expand-all"];
+  const chemSupport = !!flags["chem-support"];
 
   // --------------------------------------------------------------------------------
   // 0. Ensure corporation exists (BN3: use seed money)
@@ -78,11 +84,13 @@ export async function main(ns) {
   if (flags.loop) {
     ns.tprint(
       "bn3-corp-pipeline: starting in --loop mode (continuous corp daemon)" +
-      (assignJobs ? "" : " with --assign-none (no auto job rebalance)."),
+      (assignJobs ? "" : " with --assign-none (no auto job rebalance).") +
+      (expandAll ? " (will expand Agri to all cities)" : " (no auto expansion)") +
+      (chemSupport ? " (Chemical support enabled)" : " (no Chemical support)")
     );
     while (true) {
       try {
-        await tick(ns, AGRI_DIV, CHEM_DIV, CITIES, assignJobs);
+        await tick(ns, AGRI_DIV, CHEM_DIV, CITIES, assignJobs, expandAll, chemSupport);
       } catch (err) {
         ns.print(`bn3-corp-pipeline tick error: ${String(err)}`);
       }
@@ -101,7 +109,7 @@ export async function main(ns) {
   } else {
     // One-shot bootstrap
     try {
-      await tick(ns, AGRI_DIV, CHEM_DIV, CITIES, assignJobs);
+      await tick(ns, AGRI_DIV, CHEM_DIV, CITIES, assignJobs, expandAll, chemSupport);
     } catch (err) {
       ns.tprint(`bn3-corp-pipeline tick error: ${String(err)}`);
       return;
@@ -109,7 +117,9 @@ export async function main(ns) {
 
     ns.tprint(
       "BN3 corp bootstrap tick complete. Re-run or use --loop for continuous control." +
-      (assignJobs ? "" : " (--assign-none: job assignments were not modified.)"),
+      (assignJobs ? "" : " (--assign-none: job assignments were not modified.)") +
+      (expandAll ? " (Agri expansion to all cities allowed.)" : " (no auto expansion.)") +
+      (chemSupport ? " (Chemical support enabled.)" : " (no Chemical support.)")
     );
   }
 }
@@ -121,8 +131,9 @@ function printHelp(ns) {
   ns.tprint("");
   ns.tprint("Description");
   ns.tprint("  Bootstrap and optionally maintain a simple BN3 corporation focused on Agriculture.");
-  ns.tprint("  Creates an Agriculture division, rolls it out to 6 cities, and optionally");
-  ns.tprint("  adds a Chemical support division to supply materials if funds are available.");
+  ns.tprint("  Creates an Agriculture division, sets up existing cities, and optionally:");
+  ns.tprint("   - Expands Agri to all 6 cities (with --expand-all)");
+  ns.tprint("   - Adds a Chemical support division (with --chem-support).");
   ns.tprint("");
   ns.tprint("Notes");
   ns.tprint("  Intended for BN3 with seed money, or any BitNode with Corporation API.");
@@ -130,29 +141,32 @@ function printHelp(ns) {
   ns.tprint("  With --loop, runs continuously, stepping the corp each corporation cycle.");
   ns.tprint("  With --assign-none, offices are sized + employees hired, but job assignments");
   ns.tprint("  are left untouched so you can manage them manually in the UI.");
+  ns.tprint("  With --expand-all, Agri will expand into all standard cities as funds allow.");
+  ns.tprint("  With --chem-support, a Chemical division will be created once funds are high.");
   ns.tprint("");
   ns.tprint("Syntax");
   ns.tprint("  run corp/bn3-corp-pipeline.js [--help] [--loop] [--assign-none]");
+  ns.tprint("                                 [--expand-all] [--chem-support]");
 }
 
 /**
  * One "brain" step: ensure our basic BN3 corp structure exists and is healthy.
  *
  *  Phase A: Agriculture bootstrap (always active)
- *  Phase B: Chemical support division (optional, gated by funds)
+ *  Phase B: Chemical support division (optional, gated by funds + --chem-support)
  *  Phase C: (Hook) Tobacco + products (to be implemented later)
  *
  * @param {NS} ns
  */
-async function tick(ns, AGRI_DIV, CHEM_DIV, CITIES, assignJobs) {
+async function tick(ns, AGRI_DIV, CHEM_DIV, CITIES, assignJobs, expandAll, chemSupport) {
   const corp = ns.corporation;
   const corpInfo = corp.getCorporation();
 
   // A. Agriculture division: make sure it's fully bootstrapped
-  await ensureAgricultureDivision(ns, AGRI_DIV, CITIES, assignJobs);
+  await ensureAgricultureDivision(ns, AGRI_DIV, CITIES, assignJobs, expandAll);
 
-  // B. Once we have some money, spin up Chemical as support
-  if (corpInfo.funds > 5e11) {
+  // B. Once we have some money, optionally spin up Chemical as support
+  if (chemSupport && corpInfo.funds > 5e11) {
     await ensureChemicalSupport(ns, CHEM_DIV, AGRI_DIV, CITIES, assignJobs);
   }
 
@@ -167,10 +181,10 @@ async function tick(ns, AGRI_DIV, CHEM_DIV, CITIES, assignJobs) {
 /**
  * Make sure we have an Agriculture division that:
  *  - Exists (industry "Agriculture")
- *  - Is in all 6 cities (best-effort; will skip cities if funds are too low)
- *  - Has warehouses in all cities
- *  - Has 4-person offices with basic job spread (unless --assign-none)
- *  - Sells Plants and Food in every city
+ *  - Optionally in all 6 cities (if expandAll = true; otherwise only existing cities)
+ *  - Has warehouses in all active cities
+ *  - Has offices with basic job spread (unless --assign-none)
+ *  - Sells Food (NOT Plants) at MAX / MP in every active city
  *  - Keeps Water & Chemicals topped up with a simple scripted "Smart Supply"
  *
  * Idempotent: safe to re-run many times.
@@ -178,9 +192,10 @@ async function tick(ns, AGRI_DIV, CHEM_DIV, CITIES, assignJobs) {
  * @param {NS} ns
  * @param {string} divName
  * @param {string[]} CITIES
- * @param {boolean} assignJobs  Whether to auto-assign jobs or leave them alone.
+ * @param {boolean} assignJobs   Whether to auto-assign jobs or leave them alone.
+ * @param {boolean} expandAll    Whether to expand to all CITIES or only manage existing ones.
  */
-async function ensureAgricultureDivision(ns, divName, CITIES, assignJobs) {
+async function ensureAgricultureDivision(ns, divName, CITIES, assignJobs, expandAll) {
   const corp = ns.corporation;
   let anyChanges = false; // track whether this pass actually did anything
 
@@ -204,6 +219,14 @@ async function ensureAgricultureDivision(ns, divName, CITIES, assignJobs) {
 
       // 2) Expand to city if we aren't there yet
       if (!div.cities.includes(city)) {
+        if (!expandAll) {
+          // Respect user's desire to avoid automatic expansion.
+          ns.print(
+            `[${divName}/${city}] Not present and --expand-all is false; skipping expansion for now.`,
+          );
+          continue;
+        }
+
         const funds = corp.getCorporation().funds;
         const minFundsToExpand = 5e9; // conservative safety floor
 
@@ -254,7 +277,7 @@ async function ensureAgricultureDivision(ns, divName, CITIES, assignJobs) {
         anyChanges = true;
       }
 
-      // 5) Ensure we are selling Plants and Food at MAX / MP
+      // 5) Ensure we are selling Food only (clear Plants sells)
       ensureAgriSales(ns, divName, city);
 
       // 6) Maintain Water + Chemicals via API "Smart Supply" substitute
@@ -325,7 +348,9 @@ async function ensureOfficeWithJobs(ns, divName, city, targetSize, assignJobs) {
 
   if (!assignJobs) {
     // User wants manual control over jobs; do not touch assignments.
-    ns.print(`[${divName}/${city}] office size=${size}, jobs left to manual control (--assign-none).`);
+    ns.print(
+      `[${divName}/${city}] office size=${size}, jobs left to manual control (--assign-none).`,
+    );
     return changed;
   }
 
@@ -360,19 +385,26 @@ async function ensureOfficeWithJobs(ns, divName, city, targetSize, assignJobs) {
 }
 
 /**
- * Ensure we are selling Plants and Food in the given city.
+ * Ensure we are selling Food in the given city, and *not* selling Plants.
+ *
+ * Plants should be treated as a side output / potential input for other
+ * divisions; Food is the primary revenue source in Agriculture.
  */
 function ensureAgriSales(ns, divName, city) {
   const corp = ns.corporation;
-  const outputs = ["Plants", "Food"];
 
-  for (const mat of outputs) {
-    try {
-      // Sell all production at market price
-      corp.sellMaterial(divName, city, mat, "MAX", "MP");
-    } catch (err) {
-      ns.print(`sellMaterial(${divName}, ${city}, ${mat}) failed: ${String(err)}`);
-    }
+  // 1) Clear any existing Plants sell order by setting amount to "0".
+  try {
+    corp.sellMaterial(divName, city, "Plants", "0", "MP");
+  } catch (err) {
+    ns.print(`sellMaterial(${divName}, ${city}, Plants=0) failed: ${String(err)}`);
+  }
+
+  // 2) Sell all Food at market price.
+  try {
+    corp.sellMaterial(divName, city, "Food", "MAX", "MP");
+  } catch (err) {
+    ns.print(`sellMaterial(${divName}, ${city}, Food) failed: ${String(err)}`);
   }
 }
 
@@ -457,6 +489,8 @@ function maintainAgriInputs(ns, divName, city) {
  * - Wire exports:
  *     Agriculture -> Chemical : Plants (for Chem input)
  *     Chemical    -> Agriculture : Chemicals
+ *
+ * Only called when --chem-support is set AND funds are high.
  */
 async function ensureChemicalSupport(ns, chemDiv, agriDiv, CITIES, assignJobs) {
   const corp = ns.corporation;
@@ -545,7 +579,9 @@ async function ensureChemOfficeWithJobs(ns, divName, city, targetSize, assignJob
     const increaseBy = targetSize - size;
     try {
       corp.upgradeOfficeSize(divName, city, increaseBy);
-      ns.tprint(`[${divName}/${city}] Chem office size increased by +${increaseBy} up to ${targetSize}.`);
+      ns.tprint(
+        `[${divName}/${city}] Chem office size increased by +${increaseBy} up to ${targetSize}.`,
+      );
       size = targetSize;
     } catch (err) {
       ns.print(`upgradeOfficeSize(${divName}, ${city}) failed: ${String(err)}`);

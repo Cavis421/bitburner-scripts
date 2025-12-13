@@ -10,8 +10,12 @@ const LOWRAM_SEC_TOLERANCE   = 1.50; // Allow more security drift
 const STATUS_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
 // Each batch will only try to use this fraction of *currently free* RAM.
-// This leaves space for overlapping batches and avoids "one huge batch".
-const BATCH_RAM_FRACTION = 0.6;  // 60% of free RAM per batch
+// This leaves space for overlapping batches but is more aggressive now.
+const BATCH_RAM_FRACTION = 0.9;  // 90% of free RAM per batch
+
+// Target hack fraction per money batch (aggressive, but capped)
+const TARGET_HACK_FRACTION = 0.12; // Aim to hack ~12% money per batch
+const MAX_HACK_FRACTION    = 0.30; // Never hack more than 30% per batch
 
 // Simple formatter wrapper for money values
 function fmtMoney(ns, value) {
@@ -92,7 +96,7 @@ function printHelp(ns) {
     ns.tprint("    - Uses Formulas.exe when available for precise timings,");
     ns.tprint("    - Runs multi-batch pipelines in normal mode,");
     ns.tprint("    - Falls back to a simpler single-batch loop in low-RAM mode,");
-    ns.tprint("    - Uses pservs for grow/weaken and home for hacks when possible,");
+    ns.tprint("    - Uses home + pservs for HWGW (home prefers hacks),");
     ns.tprint("    - Falls back to home-only HWGW when you have no pservs.");
     ns.tprint("");
 
@@ -169,7 +173,6 @@ export async function main(ns) {
         totalPservRam += ns.getServerMaxRam(host);
     }
 
-
     // If we have no meaningful pserv fleet yet, just use HOME for full HWGW batches.
     // This avoids under-utilizing home when you only have a tiny pserv or two.
     if (totalPservRam < 64) {
@@ -181,7 +184,6 @@ export async function main(ns) {
         return;
     }
 
-
     // Make sure pservs have the batch scripts
     for (const host of purchased) {
         await ns.scp([hackScript, growScript, weakenScript], host);
@@ -190,7 +192,7 @@ export async function main(ns) {
     const { tHack, tGrow, tWeaken, usingFormulas } = getHackGrowWeakenTimes(ns, target);
 
     ns.tprint(`Multi-batch HYBRID batcher targeting: ${target}`);
-    ns.tprint("HOME: hack only  |  PSERVs: grow + weaken");
+    ns.tprint("HOME: hacks (plus spillover GW)  |  PSERVs: primary grow + weaken");
     ns.tprint(
         usingFormulas
             ? "Using Formulas.exe for batch timing."
@@ -207,8 +209,8 @@ export async function main(ns) {
     const GAP = 200; // ms
     const T   = tWeaken + 4 * GAP;
 
-    // Concurrency: 8 in normal mode, 1 in low-RAM mode (no overlapping batches)
-    const DESIRED_CONCURRENCY = lowRamMode ? 1 : 8;
+    // Concurrency: 16 in normal mode, 1 in low-RAM mode (no overlapping batches)
+    const DESIRED_CONCURRENCY = lowRamMode ? 1 : 16;
 
     const cycleTime     = T + GAP;
     const batchInterval = Math.max(GAP, Math.floor(cycleTime / DESIRED_CONCURRENCY));
@@ -242,13 +244,13 @@ export async function main(ns) {
             lastStatusPrint = now;
         }
 
-        // Collect worker hosts: home + pservs (others optional)
-        const hosts = getAllServers(ns)
-            .filter(h => ns.hasRootAccess(h) && ns.getServerMaxRam(h) > 0);
-
+        // ------------------------------------------------
+        // Worker discovery: ONLY home + pservs for this batcher
+        // (NPC servers are left for botnet scripts, etc.)
+        // ------------------------------------------------
         const pservSet = new Set(purchased);
+        const hosts = ["home", ...purchased];
 
-        // Calculate free RAM, with home reserve
         const workers = [];
         let totalFree = 0;
 
@@ -272,6 +274,9 @@ export async function main(ns) {
             await ns.sleep(batchInterval);
             continue;
         }
+
+        // Spread load a bit more evenly
+        shuffleArray(ns, workers);
 
         const allowedRam = totalFree * BATCH_RAM_FRACTION;
 
@@ -303,13 +308,25 @@ export async function main(ns) {
         let weakenThreads = 0;
 
         if (!prepping) {
-            // Normal money batch: target ~5% money per batch
+            // Normal money batch: target ~TARGET_HACK_FRACTION money per batch
             const pctPerHackThread = ns.hackAnalyze(target);
-            const targetFrac = 0.05;
-            hackThreads = pctPerHackThread > 0 ? Math.floor(targetFrac / pctPerHackThread) : 1;
-            if (hackThreads < 1) hackThreads = 1;
+            const targetFrac = TARGET_HACK_FRACTION;
 
-            const growMult = 1 / (1 - targetFrac);
+            if (pctPerHackThread > 0) {
+                let desiredThreads = Math.floor(targetFrac / pctPerHackThread);
+
+                // Hard cap: never hack more than MAX_HACK_FRACTION
+                const maxThreads = Math.floor(MAX_HACK_FRACTION / pctPerHackThread);
+                if (maxThreads > 0) {
+                    desiredThreads = Math.min(desiredThreads, maxThreads);
+                }
+
+                hackThreads = Math.max(1, desiredThreads);
+            } else {
+                hackThreads = 1;
+            }
+
+            const growMult = 1 / (1 - TARGET_HACK_FRACTION);
             growThreads = Math.ceil(ns.growthAnalyze(target, growMult));
             if (growThreads < 1) growThreads = 1;
 
@@ -374,7 +391,7 @@ export async function main(ns) {
             );
         }
 
-        // Split hosts into home and non-home (we want hacks on home, grow/weaken elsewhere)
+        // Split hosts into home and non-home
         const homeHost = workers.find(w => w.isHome);
         const nonHome  = workers.filter(w => !w.isHome);
 
@@ -386,8 +403,11 @@ export async function main(ns) {
         const weak1Threads = weakenThreads;
         const weak2Threads = weakenThreads;
 
-        // Weaken 1 (non-home preferred)
-        allocToHosts(ns, nonHome, weakenScript, target, weak1Threads, delayWeak1);
+        // Hosts eligible for grow/weaken: pservs + home (spillover)
+        const gwHosts = homeHost ? [homeHost, ...nonHome] : nonHome;
+
+        // Weaken 1
+        allocToHosts(ns, gwHosts, weakenScript, target, weak1Threads, delayWeak1);
 
         // Hacks on home if possible, else on non-home
         if (!prepping && hackThreads > 0) {
@@ -398,13 +418,13 @@ export async function main(ns) {
             }
         }
 
-        // Grows on non-home
+        // Grows
         if (growThreads > 0) {
-            allocToHosts(ns, nonHome, growScript, target, growThreads, delayGrow, tGrow);
+            allocToHosts(ns, gwHosts, growScript, target, growThreads, delayGrow, tGrow);
         }
 
-        // Weaken 2 (non-home)
-        allocToHosts(ns, nonHome, weakenScript, target, weak2Threads, delayWeak2);
+        // Weaken 2
+        allocToHosts(ns, gwHosts, weakenScript, target, weak2Threads, delayWeak2);
 
         await ns.sleep(batchInterval);
     }
