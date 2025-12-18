@@ -14,7 +14,7 @@
  */
 export async function main(ns) {
   ns.disableLog("ALL");
-  ns.tail();
+  ns.ui.openTail();
 
   if (!ns.stock || typeof ns.stock.getSymbols !== "function") {
     ns.tprint("ERROR: Stock API not available.");
