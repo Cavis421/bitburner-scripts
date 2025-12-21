@@ -37,9 +37,109 @@ function clamp(x, min, max) {
 }
 
 function fmtMoney(ns, value) {
-  // 2 decimal places, suffixes from 1k and up.
-  // Signature is: formatNumber(value, fractionalDigits = 2, suffixStart = 1000)
   return "$" + ns.formatNumber(value, 2, 1e3);
+}
+
+// ------------------------------------------------
+// Rooting helpers (FIX: remove botnet/root timing race)
+// ------------------------------------------------
+
+function getCrackerFns(ns) {
+  const fns = [];
+  if (ns.fileExists("BruteSSH.exe", "home")) fns.push((h) => ns.brutessh(h));
+  if (ns.fileExists("FTPCrack.exe", "home")) fns.push((h) => ns.ftpcrack(h));
+  if (ns.fileExists("relaySMTP.exe", "home")) fns.push((h) => ns.relaysmtp(h));
+  if (ns.fileExists("HTTPWorm.exe", "home")) fns.push((h) => ns.httpworm(h));
+  if (ns.fileExists("SQLInject.exe", "home")) fns.push((h) => ns.sqlinject(h));
+  return fns;
+}
+
+/**
+ * Returns true if host is rootable *right now* (by your level + crackers).
+ */
+function isRootableNow(ns, host, crackerCount) {
+  const s = ns.getServer(host);
+  if (s.hasAdminRights) return false;
+  if (host === "home" || host === "darkweb") return false;
+  if (s.purchasedByPlayer) return false;
+
+  const reqHack = s.requiredHackingSkill;
+  const reqPorts = s.numOpenPortsRequired ?? ns.getServerNumPortsRequired(host);
+
+  return reqHack <= ns.getHackingLevel() && reqPorts <= crackerCount;
+}
+
+/**
+ * Attempt to root all servers that are rootable now.
+ * Returns { rooted, attempted } counts.
+ */
+function rootAllPossible(ns) {
+  const servers = getAllServers(ns);
+  const crackerFns = getCrackerFns(ns);
+  const crackerCount = crackerFns.length;
+
+  let attempted = 0;
+  let rooted = 0;
+
+  for (const host of servers) {
+    if (!isRootableNow(ns, host, crackerCount)) continue;
+
+    attempted++;
+    try {
+      // Open whatever ports we can (order doesn’t matter)
+      for (const fn of crackerFns) {
+        try { fn(host); } catch (_e) { /* ignore */ }
+      }
+
+      try { ns.nuke(host); } catch (_e) { /* ignore */ }
+
+      if (ns.hasRootAccess(host)) rooted++;
+    } catch (_e) {
+      // Keep going; some servers can still fail if something weird happens.
+    }
+  }
+
+  return { rooted, attempted };
+}
+
+/**
+ * Wait until all currently-rootable servers are rooted (or timeout).
+ * This is the key fix: prevents botnet from racing rooting.
+ */
+async function waitForRootCoverage(ns, opts = {}) {
+  const timeoutMs = Math.max(1_000, Number(opts.timeoutMs ?? 30_000));
+  const pollMs = Math.max(100, Number(opts.pollMs ?? 500));
+
+  const start = Date.now();
+  while (true) {
+    const servers = getAllServers(ns);
+    const crackerCount = countPortCrackers(ns);
+    const hackingLevel = ns.getHackingLevel();
+
+    let rootableNow = 0;
+    let rootedNow = 0;
+
+    for (const host of servers) {
+      const s = ns.getServer(host);
+      if (host === "home" || host === "darkweb") continue;
+      if (s.purchasedByPlayer) continue;
+
+      const reqHack = s.requiredHackingSkill;
+      const reqPorts = s.numOpenPortsRequired ?? ns.getServerNumPortsRequired(host);
+
+      if (reqHack <= hackingLevel && reqPorts <= crackerCount) {
+        rootableNow++;
+        if (s.hasAdminRights) rootedNow++;
+      }
+    }
+
+    // If everything we can root right now is rooted, we’re good.
+    if (rootedNow >= rootableNow) return true;
+
+    if (Date.now() - start > timeoutMs) return false;
+
+    await ns.sleep(pollMs);
+  }
 }
 
 // ------------------------------------------------
@@ -59,11 +159,6 @@ function hasFormulas(ns) {
   }
 }
 
-/**
- * Return { tHack, chance, usingFormulas } for a given host.
- * Uses ns.formulas.hacking.* if Formulas.exe is available, otherwise
- * falls back to ns.getHackTime / ns.hackAnalyzeChance.
- */
 function getHackTimeAndChance(ns, host) {
   if (!hasFormulas(ns)) {
     return {
@@ -76,7 +171,6 @@ function getHackTimeAndChance(ns, host) {
   const player = ns.getPlayer();
   const s = ns.getServer(host);
 
-  // For scoring we assume a "prepped" target: min sec, max money.
   s.hackDifficulty = s.minDifficulty;
   s.moneyAvailable = Math.max(1, s.moneyMax || 0);
 
@@ -97,13 +191,11 @@ function getScoredServers(ns, extraExcluded = []) {
   const pservs = new Set(ns.getPurchasedServers());
   const portCrackers = countPortCrackers(ns);
 
-  // Basic filters
-  const MIN_MONEY_ABS = 1_000_000; // ignore truly trash servers
-  const MIN_HACK_RATIO = 0.02;     // at least 2% of your level
+  const MIN_MONEY_ABS = 1_000_000;
+  const MIN_HACK_RATIO = 0.02;
   const EXCLUDED = new Set([
     "home",
     "darkweb",
-    // ultra-early game stuff we never want to main-target late:
     "n00dles",
     "foodnstuff",
     "sigma-cosmetics",
@@ -117,7 +209,7 @@ function getScoredServers(ns, extraExcluded = []) {
 
   for (const host of servers) {
     if (EXCLUDED.has(host)) continue;
-    if (pservs.has(host)) continue; // never target purchased servers
+    if (pservs.has(host)) continue;
 
     const s = ns.getServer(host);
 
@@ -126,12 +218,10 @@ function getScoredServers(ns, extraExcluded = []) {
     const maxMoney = s.moneyMax;
     const minSec   = s.minDifficulty || 1;
 
-    // Capability checks
-    if (reqHack > hackingLevel) continue;                // can't hack yet
-    if (reqPorts > portCrackers) continue;               // can't root yet
-    if (!maxMoney || maxMoney < MIN_MONEY_ABS) continue; // too poor
+    if (reqHack > hackingLevel) continue;
+    if (reqPorts > portCrackers) continue;
+    if (!maxMoney || maxMoney < MIN_MONEY_ABS) continue;
 
-    // Avoid *super* trivial stuff relative to current level
     const hackRatio = reqHack / Math.max(1, hackingLevel);
     if (hackRatio < MIN_HACK_RATIO) continue;
 
@@ -140,16 +230,13 @@ function getScoredServers(ns, extraExcluded = []) {
 
     const moneyPerSec = maxMoney / tHack;
 
-    // Slight penalties / modifiers
-    const secPenalty = 1 + (minSec - 1) / 100; // very gentle
+    const secPenalty = 1 + (minSec - 1) / 100;
 
-    // Hack level band preference: targets ~20–80% of your level are "ideal"
     let bandBonus;
-    if (hackRatio < 0.2)       bandBonus = 0.7;  // too easy: slight penalty
-    else if (hackRatio <= 0.8) bandBonus = 1.0;  // sweet spot
-    else                       bandBonus = 0.85; // slightly above level: small penalty
+    if (hackRatio < 0.2)       bandBonus = 0.7;
+    else if (hackRatio <= 0.8) bandBonus = 1.0;
+    else                       bandBonus = 0.85;
 
-    // Chance modifier: 0.5–1.0 range
     const chanceModifier = 0.5 + 0.5 * clamp(chance, 0, 1);
 
     const score = (moneyPerSec * bandBonus * chanceModifier) / secPenalty;
@@ -236,14 +323,13 @@ function getXpScoredServers(ns, extraExcluded = []) {
 
   for (const host of servers) {
     if (EXCLUDED.has(host)) continue;
-    if (pservs.has(host)) continue; // never farm purchased servers
+    if (pservs.has(host)) continue;
 
     const s = ns.getServer(host);
 
     const reqHack  = s.requiredHackingSkill;
     const reqPorts = s.numOpenPortsRequired ?? ns.getServerNumPortsRequired(host);
 
-    // Capability checks – must be hackable/rootable
     if (reqHack > hackingLevel) continue;
     if (reqPorts > portCrackers) continue;
 
@@ -252,18 +338,13 @@ function getXpScoredServers(ns, extraExcluded = []) {
 
     const hackRatio = reqHack / Math.max(1, hackingLevel);
 
-    // XP sweet spot:
-    //  - below ~40% of your level = too easy → penalty
-    //  - ~40–120% of your level = sweet band
-    //  - way above = small penalty (still sometimes okay)
     let bandBonus;
-    if (hackRatio < 0.4)       bandBonus = 0.5;  // way too easy
-    else if (hackRatio <= 1.2) bandBonus = 1.1;  // prime XP band
-    else if (hackRatio <= 1.6) bandBonus = 1.0;  // a bit above you
-    else                       bandBonus = 0.7;  // too hard / slow
+    if (hackRatio < 0.4)       bandBonus = 0.5;
+    else if (hackRatio <= 1.2) bandBonus = 1.1;
+    else if (hackRatio <= 1.6) bandBonus = 1.0;
+    else                       bandBonus = 0.7;
 
-    // XP per second approx: difficulty-ish * success rate / time^1.2
-    const chanceModifier = 0.5 + 0.5 * clamp(chance, 0, 1); // 0.5–1.0
+    const chanceModifier = 0.5 + 0.5 * clamp(chance, 0, 1);
     const baseXpScore    = (reqHack * chanceModifier) / Math.pow(tHack, 1.2);
 
     const score = baseXpScore * bandBonus;
@@ -283,7 +364,6 @@ function getXpScoredServers(ns, extraExcluded = []) {
 }
 
 function chooseXpTarget(ns, primary) {
-  // Explicitly exclude the main batch target to avoid conflict
   const scored = getXpScoredServers(ns, [primary]);
 
   if (scored.length === 0) {
@@ -323,7 +403,6 @@ function chooseXpTarget(ns, primary) {
   return best.host;
 }
 
-// (Optional: keep the old money-based secondary in case you use it elsewhere)
 function chooseSecondaryTarget(ns, primary) {
   const scored = getScoredServers(ns, [primary]);
 
@@ -357,9 +436,6 @@ export async function main(ns) {
     ["help", false],    // show help and exit
   ]);
 
-  // --------------------------------------------------
-  // --help short-circuit
-  // --------------------------------------------------
   if (flags.help) {
     printHelp(ns);
     return;
@@ -367,9 +443,6 @@ export async function main(ns) {
 
   const hgwMode = String(flags.hgw ?? "money").toLowerCase();
 
-  // --------------------------------------------------
-  // Parse optional extras: --extras pserv,hacknet,ui | --extras all
-  // --------------------------------------------------
   const extrasRaw = String(flags.extras || "").toLowerCase();
   const extrasTokens = extrasRaw
     .split(/[,\s]+/)
@@ -377,7 +450,6 @@ export async function main(ns) {
     .filter(Boolean);
 
   const extrasSet = new Set();
-
   for (const token of extrasTokens) {
     if (token === "all" || token === "*") {
       extrasSet.add("pserv");
@@ -385,25 +457,15 @@ export async function main(ns) {
       extrasSet.add("ui");
       continue;
     }
-    if (["pserv", "pservs", "pserver", "pservers"].includes(token)) {
-      extrasSet.add("pserv");
-      continue;
-    }
-    if (["hacknet", "hn"].includes(token)) {
-      extrasSet.add("hacknet");
-      continue;
-    }
-    if (["ui", "dashboard", "ops"].includes(token)) {
-      extrasSet.add("ui");
-      continue;
-    }
+    if (["pserv", "pservs", "pserver", "pservers"].includes(token)) { extrasSet.add("pserv"); continue; }
+    if (["hacknet", "hn"].includes(token)) { extrasSet.add("hacknet"); continue; }
+    if (["ui", "dashboard", "ops"].includes(token)) { extrasSet.add("ui"); continue; }
   }
 
   const wantPserv   = extrasSet.has("pserv");
   const wantHacknet = extrasSet.has("hacknet");
   const wantUi      = extrasSet.has("ui");
 
-  // Snapshot of current hardware for decisions
   const homeMaxRam = ns.getServerMaxRam("home");
   const pservs = ns.getPurchasedServers();
   let minPservRam = 0;
@@ -415,17 +477,13 @@ export async function main(ns) {
     }
   }
 
-  // Dynamic home RAM reserve: 10% of home, min 8GB, max 128GB
   const HOME_RAM_RESERVE = (() => {
     const max = homeMaxRam;
     return Math.min(128, Math.max(8, Math.floor(max * 0.10)));
   })();
 
-  // Dynamic pserv target RAM:
-  //  - Keep goals modest early so pserv-manager actually does work
-  //  - Scale up as home gets beefier
   const PSERV_TARGET_RAM = (() => {
-    if (homeMaxRam < 128)  return 32;   // tiny setup
+    if (homeMaxRam < 128)  return 32;
     if (homeMaxRam < 256)  return 64;
     if (homeMaxRam < 512)  return 128;
     if (homeMaxRam < 1024) return 256;
@@ -433,26 +491,16 @@ export async function main(ns) {
     return 1024;
   })();
 
-  // Auto-toggle low-RAM mode for timed-net-batcher2:
-  // In "advanced" startup we only treat the environment as low-RAM when
-  // home is still tiny.
   const USE_LOW_RAM_MODE =
     homeMaxRam < 128 &&
     (pservs.length === 0 || minPservRam < 64);
 
-  if (USE_LOW_RAM_MODE) {
-    ns.tprint(
-      "Low-RAM batch mode ENABLED for timed-net-batcher2.js " +
-      `(home=${homeMaxRam.toFixed(1)}GB, min pserv=${minPservRam || 0}GB).`
-    );
-  } else {
-    ns.tprint(
-      "Full batch mode (no --lowram) for timed-net-batcher2.js " +
-      `(home=${homeMaxRam.toFixed(1)}GB, min pserv=${minPservRam || 0}GB).`
-    );
-  }
+  ns.tprint(
+    USE_LOW_RAM_MODE
+      ? `Low-RAM batch mode ENABLED for timed-net-batcher2.js (home=${homeMaxRam.toFixed(1)}GB, min pserv=${minPservRam || 0}GB).`
+      : `Full batch mode (no --lowram) for timed-net-batcher2.js (home=${homeMaxRam.toFixed(1)}GB, min pserv=${minPservRam || 0}GB).`
+  );
 
-  // Positional argument: optional batch target override
   const override = flags._[0] || null;
 
   let batchTarget;
@@ -467,7 +515,6 @@ export async function main(ns) {
     ns.tprint(`STARTUP-HOME: Auto-selected batch target: ${batchTarget}`);
   }
 
-  // Choose HGW target (XP or money), distinct from batch target when possible
   if (hgwMode === "money") {
     ns.tprint("HGW Mode: MONEY");
     hgwTarget = chooseSecondaryTarget(ns, batchTarget);
@@ -488,26 +535,53 @@ export async function main(ns) {
     "STARTUP-HOME: Killing all processes on home " +
     "(except startup + corp/agri-structure.js + corp/agri-inputs.js + corp/agri-sales.js)."
   );
+
   const myPid = ns.pid;
   const keepFiles = new Set([
     "corp/agri-structure.js",
     "corp/agri-inputs.js",
     "corp/agri-sales.js",
   ]);
+
   const processes = ns.ps("home");
   for (const p of processes) {
     if (p.pid === myPid) continue;
     if (keepFiles.has(p.filename)) continue;
     ns.kill(p.pid);
   }
-  await ns.sleep(200); // allow cleanup
-  ns.tprint("Home is clean. Relaunching core automation.");
+
+  await ns.sleep(200);
+  ns.tprint("Home is clean. Proceeding with rooting + relaunch.");
+
+  // --------------------------------------------------
+  // FIX: root first (so batcher + botnet don't race it)
+  // --------------------------------------------------
+
+  const before = rootAllPossible(ns);
+  ns.tprint(`ROOT PASS: rooted=${before.rooted}/${before.attempted} newly-rootable targets (attempted).`);
+
+  // Optional: if you still want core/root-and-deploy.js to do copying/backdoor/etc
+  // we can start it, but we no longer *depend* on it for initial rooting.
+  if (ns.fileExists("core/root-and-deploy.js", "home")) {
+    const pid = ns.exec("core/root-and-deploy.js", "home", 1);
+    if (pid === 0) ns.tprint("WARN: Failed to launch core/root-and-deploy.js (continuing).");
+    else ns.tprint(`Started ROOT + DEPLOY daemon (pid ${pid}).`);
+  } else {
+    ns.tprint("WARN: core/root-and-deploy.js missing; relying on startup rooting pass only.");
+  }
+
+  // Keep trying briefly in case you just bought a cracker / leveled / etc.
+  const ok = await waitForRootCoverage(ns, { timeoutMs: 20_000, pollMs: 500 });
+  if (!ok) {
+    ns.tprint("WARN: Root coverage not complete within timeout. Continuing anyway.");
+  } else {
+    ns.tprint("Root coverage OK: all currently-rootable servers are rooted.");
+  }
 
   // --------------------------------------------------
   // RAM-aware scheduler
   // --------------------------------------------------
 
-  // Helper: calculate RAM cost for a script@threads (or Infinity if missing)
   function cost(script, threads = 1) {
     if (!ns.fileExists(script, "home")) {
       ns.tprint(`Missing script (skipping in plan): ${script}`);
@@ -517,10 +591,10 @@ export async function main(ns) {
   }
 
   const maxRam = homeMaxRam;
-  const budget = maxRam - HOME_RAM_RESERVE; // total RAM we are willing to spend on non-batcher stuff
-  let usedPlanned = ns.getServerUsedRam("home"); // starts with just this script
+  const budget = maxRam - HOME_RAM_RESERVE;
+  let usedPlanned = ns.getServerUsedRam("home");
 
-  // 1) ALWAYS try to launch MONEY BATCHER first, ignoring the soft budget.
+  // 1) Launch MONEY BATCHER (now target should be rooted)
   const batcherArgs = USE_LOW_RAM_MODE ? [batchTarget, "--lowram"] : [batchTarget];
   const batcherRamCost = cost("core/timed-net-batcher2.js", 1);
 
@@ -532,44 +606,44 @@ export async function main(ns) {
       );
     } else {
       const pid = ns.exec("core/timed-net-batcher2.js", "home", 1, ...batcherArgs);
-      if (pid === 0) {
-        ns.tprint("Failed to launch MONEY BATCHER (core/timed-net-batcher2.js).");
-      } else {
-        usedPlanned = ns.getServerUsedRam("home"); // refresh from real usage
-        const argInfo = batcherArgs.length ? ` ${JSON.stringify(batcherArgs)}` : "";
-        ns.tprint(`Started REQUIRED MONEY BATCHER (pid ${pid})${argInfo}`);
+      if (pid === 0) ns.tprint("Failed to launch MONEY BATCHER (core/timed-net-batcher2.js).");
+      else {
+        usedPlanned = ns.getServerUsedRam("home");
+        ns.tprint(`Started REQUIRED MONEY BATCHER (pid ${pid}) ${JSON.stringify(batcherArgs)}`);
       }
     }
   }
 
-  // 2) Remaining jobs respect the RAM budget.
+  // 2) Launch BOTNET after rooting is handled (FIX)
+  // NOTE: This is the big race fix vs your old ordering.
+  {
+    const botnetRam = cost("botnet/botnet-hgw-sync.js", 1);
+    if (isFinite(botnetRam)) {
+      const futureUsed = usedPlanned + botnetRam;
+      if (futureUsed > budget) {
+        ns.tprint(
+          `Skipping BOTNET HGW SYNC — would exceed budget ${futureUsed.toFixed(1)}GB > ${budget.toFixed(1)}GB`
+        );
+      } else {
+        const pid = ns.exec("botnet/botnet-hgw-sync.js", "home", 1, hgwTarget, hgwMode);
+        if (pid === 0) ns.tprint("Failed to launch BOTNET HGW SYNC (botnet/botnet-hgw-sync.js).");
+        else {
+          usedPlanned = ns.getServerUsedRam("home");
+          ns.tprint(`Started BOTNET HGW SYNC (pid ${pid}) [${hgwTarget}, ${hgwMode}]`);
+        }
+      }
+    }
+  }
+
+  // 3) Optional extras
   const plan = [];
 
-  // Always include core/root-and-deploy + botnet/botnet-hgw-sync
-  plan.push({
-    name: "core/root-and-deploy.js",
-    threads: 1,
-    args: [],
-    label: "ROOT + DEPLOY",
-    required: true,
-  });
-
-  plan.push({
-    name: "botnet/botnet-hgw-sync.js",
-    threads: 1,
-    args: [hgwTarget, hgwMode],
-    label: "BOTNET HGW SYNC",
-    required: true,
-  });
-
-  // Optional extras, controlled by --extras
   if (wantPserv) {
     plan.push({
       name: "pserv/pserv-manager.js",
       threads: 1,
       args: [PSERV_TARGET_RAM],
       label: "PSERV MANAGER",
-      required: false,
     });
   }
 
@@ -579,7 +653,6 @@ export async function main(ns) {
       threads: 1,
       args: [],
       label: "HACKNET SMART",
-      required: false,
     });
   }
 
@@ -589,37 +662,27 @@ export async function main(ns) {
       threads: 1,
       args: [batchTarget],
       label: "OPS DASHBOARD (one-shot)",
-      required: false,
     });
   }
 
   for (const job of plan) {
     const jobRam = cost(job.name, job.threads);
-    if (!isFinite(jobRam)) {
-      if (job.required) {
-        ns.tprint(`Required job ${job.label} (${job.name}) is missing.`);
-      }
-      continue;
-    }
+    if (!isFinite(jobRam)) continue;
 
     const futureUsed = usedPlanned + jobRam;
-
-    // Normal case: respect RAM budget
     if (futureUsed > budget) {
       ns.tprint(
-        "Skipping " + job.label + " (" + job.name + ") — would exceed budget " +
+        `Skipping ${job.label} (${job.name}) — would exceed budget ` +
         `${futureUsed.toFixed(1)}GB > ${budget.toFixed(1)}GB`
       );
       continue;
     }
 
     const pid = ns.exec(job.name, "home", job.threads, ...(job.args || []));
-    if (pid === 0) {
-      ns.tprint(`Failed to launch ${job.label} (${job.name}).`);
-    } else {
-      usedPlanned = ns.getServerUsedRam("home"); // sync actual
-      const argInfo = job.args && job.args.length ? ` ${JSON.stringify(job.args)}` : "";
-      ns.tprint(`Started ${job.label} (pid ${pid})${argInfo}`);
+    if (pid === 0) ns.tprint(`Failed to launch ${job.label} (${job.name}).`);
+    else {
+      usedPlanned = ns.getServerUsedRam("home");
+      ns.tprint(`Started ${job.label} (pid ${pid}) ${job.args?.length ? JSON.stringify(job.args) : ""}`);
     }
   }
 
@@ -628,11 +691,8 @@ export async function main(ns) {
 
   if (ns.fileExists("botnet/botnet-hgw-status.js", "home")) {
     const pid = ns.exec("botnet/botnet-hgw-status.js", "home", 1);
-    if (pid === 0) {
-      ns.tprint("Failed to launch BOTNET STATUS after deployment delay.");
-    } else {
-      ns.tprint(`Started BOTNET STATUS (pid ${pid}) after deployment delay.`);
-    }
+    if (pid === 0) ns.tprint("Failed to launch BOTNET STATUS after deployment delay.");
+    else ns.tprint(`Started BOTNET STATUS (pid ${pid}) after deployment delay.`);
   } else {
     ns.tprint("BOTNET STATUS script not found on home.");
   }
@@ -654,12 +714,12 @@ function printHelp(ns) {
   ns.tprint("  Advanced home startup/launcher.");
   ns.tprint("  Picks a batch target, chooses an HGW target for XP or money,");
   ns.tprint("  kills existing scripts on home (except itself and corp/agri-* helpers),");
-  ns.tprint("  and launches:");
+  ns.tprint("  ROOTS all currently-rootable servers (fixes ordering/race), then launches:");
   ns.tprint("    - core/timed-net-batcher2.js");
-  ns.tprint("    - core/root-and-deploy.js");
   ns.tprint("    - botnet/botnet-hgw-sync.js");
+  ns.tprint("  Optionally launches core/root-and-deploy.js as a daemon for extra deploy work.");
   ns.tprint("  Optional extras via --extras:");
-  ns.tprint("    - pserv/pserv-manager.js (PSERV_TARGET_RAM goal)");
+  ns.tprint("    - pserv/pserv-manager.js");
   ns.tprint("    - hacknet/hacknet-smart.js");
   ns.tprint("    - ui/ops-dashboard.js (one-shot dashboard)");
   ns.tprint("");
@@ -667,12 +727,7 @@ function printHelp(ns) {
   ns.tprint("  - Safe to rerun; it will re-kill and restart your core automation.");
   ns.tprint("  - Uses Formulas.exe automatically when present for target scoring.");
   ns.tprint("  - Auto-enables timed-net-batcher2 --lowram mode on very small setups.");
-  ns.tprint("  - --extras controls optional subsystems (pserv, hacknet, ui); default is minimal.");
-  ns.tprint("    Examples: --extras pserv | --extras pserv,hacknet,ui | --extras all");
-  ns.tprint("  - HGW mode controls the secondary HGW target:");
-  ns.tprint("      --hgw money  => distinct money server, separate from batch target");
-  ns.tprint("      --hgw xp     => high-security XP target.");
-  ns.tprint("  - Preserves corp/agri-structure.js, corp/agri-inputs.js, corp/agri-sales.js.");
+  ns.tprint("  - Fix: rooting happens before botnet/batcher start to prevent race errors.");
   ns.tprint("");
   ns.tprint("Syntax");
   ns.tprint("  run core/startup-home-advanced.js");
@@ -684,3 +739,4 @@ function printHelp(ns) {
   ns.tprint("  run core/startup-home-advanced.js omega-net --hgw money --extras ui");
   ns.tprint("  run core/startup-home-advanced.js --help");
 }
+// ooo fixed
