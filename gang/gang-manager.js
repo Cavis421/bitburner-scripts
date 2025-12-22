@@ -98,6 +98,12 @@ export async function main(ns) {
     territoryMaxFrac: 0.95,
     territoryFracRampAt: 0.75,
 
+    // Territory taper: once you're mostly done, stop over-allocating TW
+    territoryTaperAt: 0.95,        // start tapering TW when territory >= 95%
+    territoryTaperTo: 0.15,        // TW fraction when territory reaches stopAt (but before endgame shuts it off)
+    territoryKeepMin: 2,           // always keep at least N on TW (until endgame)
+    territoryKeepMax: 4,           // don't keep more than N when tapering (optional safety)
+
     // Endgame: stop warfare and monetize
     territoryStopAt: 0.99,
 
@@ -225,7 +231,7 @@ export async function main(ns) {
       }
 
       // Territory fraction (base): ramp based on median chance
-      const territoryFracBase = (inEndgame || recovery)
+      let territoryFracBase = (inEndgame || recovery)
         ? 0
         : ramp(
             clash.median,
@@ -234,6 +240,13 @@ export async function main(ns) {
             cfg.territoryMinFrac,
             cfg.territoryMaxFrac
           );
+
+      // If we're near-capped on territory, taper TW fraction down toward territoryTaperTo
+      if (!inEndgame && !recovery && g.territory >= cfg.territoryTaperAt) {
+        const t = clamp01((g.territory - cfg.territoryTaperAt) / (cfg.territoryStopAt - cfg.territoryTaperAt));
+        const tapered = lerp(territoryFracBase, cfg.territoryTaperTo, t);
+        territoryFracBase = Math.min(territoryFracBase, tapered);
+      }
 
       // --- PRELIM decision (used to evaluate gear + next-cost) ---
       const prelimDecision = assignCombatTasksAndTiers(ns, names, cfg, {
@@ -509,7 +522,17 @@ function assignCombatTasksAndTiers(ns, names, cfg, control) {
   const afterVigi = pool.filter(x => !vigilantes.has(x.name)); // strongest-first
 
   // Territory assignment: strongest slice
-  const territoryCount = Math.max(0, Math.floor(afterVigi.length * (control.territoryFrac ?? 0)));
+  let territoryCount = Math.max(0, Math.floor(afterVigi.length * (control.territoryFrac ?? 0)));
+
+  // Keep a small TW squad while we're still fighting for the last few %
+  if (!control.recovery && (control.territoryFrac ?? 0) > 0) {
+    territoryCount = Math.max(territoryCount, cfg.territoryKeepMin);
+    territoryCount = Math.min(territoryCount, cfg.territoryKeepMax ?? territoryCount);
+  }
+
+  // Also don't exceed available 
+  territoryCount = Math.min(territoryCount, afterVigi.length);
+
   const territorySet = new Set(afterVigi.slice(0, territoryCount).map(x => x.name));
 
   for (const { name } of afterVigi) {
