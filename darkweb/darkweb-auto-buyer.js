@@ -16,15 +16,16 @@
  * It loops until all target programs are owned, then exits.
  */
 
+import { fmtMoney } from "lib/format.js";
+
 export async function main(ns) {
-  // Add --help support (script does not use positional args)
   const flags = ns.flags([
     ["help", false],
   ]);
 
   if (flags.help) {
     printHelp(ns);
-    return; // Do not run auto-buy logic when showing help
+    return;
   }
 
   ns.disableLog("ALL");
@@ -86,14 +87,14 @@ export async function main(ns) {
       const money = ns.getServerMoneyAvailable("home");
 
       if (money >= cost) {
-        // Fix: use ns.formatNumber instead of invalid ns.ns.formatNumber
-        const costStr = ns.formatNumber(cost, "$0.00a");
-        const moneyStr = ns.formatNumber(money, "$0.00a");
+        const costStr = fmtMoney(ns, cost);
+        const moneyStr = fmtMoney(ns, money);
 
         ns.tprint(
           `Attempting to purchase ${prog} for ${costStr} ` +
           `(you: ${moneyStr})`
         );
+
         const ok = ns.singularity.purchaseProgram(prog);
         if (ok) {
           ns.tprint(`Purchased ${prog}.`);
@@ -101,8 +102,8 @@ export async function main(ns) {
           ns.tprint(`purchaseProgram(${prog}) failed (maybe already owned or some other issue).`);
         }
       } else {
-        const moneyStr = ns.formatNumber(money, "$0.00a");
-        const costStr = ns.formatNumber(cost, "$0.00a");
+        const moneyStr = fmtMoney(ns, money);
+        const costStr = fmtMoney(ns, cost);
         ns.print(
           `Waiting for funds for ${prog}: ` +
           `${moneyStr} / ${costStr}`
@@ -115,10 +116,13 @@ export async function main(ns) {
       return;
     }
 
-    // Wait a bit before checking again
     await ns.sleep(CHECK_INTERVAL);
   }
 }
+
+// --------------------------------------------------
+// Help Function
+// --------------------------------------------------
 
 function printHelp(ns) {
   ns.tprint("darkweb/darkweb-auto-buyer.js");
