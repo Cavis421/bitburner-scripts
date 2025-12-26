@@ -1,28 +1,16 @@
-/** @param {NS} ns */
-/*
+/**
  * core/controller.js
  *
  * Description
- *  Single “brain” daemon that:
- *    - Picks targets (money + HGW XP/money) using lib/targets.js
- *    - Roots all currently-rootable servers (race-free) using lib/rooting.js
- *    - Checks free RAM on home and starts required daemons only when affordable (lib/orchestrator.js via lib/daemon-lane.js)
- *    - Uses Singularity (BN4/SF4+) to auto-buy TOR, Dark Web programs, and WSE/TIX/4S (lib/singularity-lane.js)
- *    - Creates a gang as soon as possible and starts gang/gang-manager.js (lib/gang.js + lib/daemon-lane.js)
- *    - Optional player automation (default ON): hybrid crime -> gang -> faction rep (lib/player-policy.js)
- *    - Purchase-only augmentation automation (lib/augs-controller.js): buys when possible, no installs/resets
+ *  Single controller daemon that checks free RAM and starts required daemons when affordable.
+ *  Uses lib/targets.js for target selection and lib/rooting.js for race-free rooting.
+ *  Uses Singularity for TOR/Darkweb/WSE/invite automation, plus purchase-only augmentation automation.
+ *  Includes optional player automation (default ON): crime->gang->faction work.
+ *  Sets a pserv purchase policy: cap at 2048 until (Formulas.exe + WSE+TIX+4S).
  *
- * Notes
- *  - Intended to replace core/startup-home-advanced.js as your “one script you run”.
- *  - Does NOT kill other processes by default; it only “ensures” required daemons exist.
- *  - Adds a pserv policy by setting cfg.pservArgs:
- *      - caps pserv maxRam at 2048 until you have BOTH:
- *          - Formulas.exe
- *          - WSE + TIX + 4S Data + 4S TIX
- *
- * IMPORTANT
- *  - For this to actually apply, lib/daemon-lane.js must pass cfg.pservArgs into ensureDaemon() for pserv.
- *    (One small change there—ask if you want me to paste the drop-in.)
+ *  Corp handling (UPDATED):
+ *   - Controller will start a corp daemon when a corp exists.
+ *   - Corp is persistent between Aug resets, so we do NOT auto-kill/restart it.
  *
  * Syntax
  *  run core/controller.js
@@ -31,6 +19,8 @@
  *  run core/controller.js --player false
  *  run core/controller.js --help
  */
+
+/** @param {NS} ns */
 
 import { rootAllPossible, waitForRootCoverage } from "lib/rooting.js";
 import { initTargets, runTargetingTick } from "lib/target-lane.js";
@@ -44,7 +34,6 @@ import { runSingularityTick } from "lib/singularity-lane.js";
 import { formatWorkBrief } from "lib/work.js";
 import { flushLog } from "lib/logging.js";
 import { runHacknetTick } from "lib/hacknet-lane.js";
-import { runCorpTick } from "lib/corp-lane.js";
 import { runHomeUpgradesTick } from "lib/home-upgrades-lane.js";
 
 const FLAGS = [
@@ -93,6 +82,10 @@ const FLAGS = [
 
   // Player automation
   ["player", true],            // default ON; set --player false to disable
+
+  // Corp daemon
+  ["corp", true],              // enable starting corp daemon when corp exists
+  ["corpDaemon", "bin/corp-daemon.js"], // script to run when corp exists
 ];
 
 const PLAYER_DEFAULTS = PLAYER_POLICY_DEFAULTS;
@@ -143,6 +136,10 @@ export async function main(ns) {
 
     // NEW: args for pserv manager (daemon-lane should pass these to ensureDaemon)
     pservArgs: [],
+
+    // Corp daemon config
+    corp: !!flags.corp,
+    corpDaemon: String(flags.corpDaemon || "bin/corp-daemon.js"),
   };
 
   // Target state (so we can avoid unnecessary restarts)
@@ -159,9 +156,6 @@ export async function main(ns) {
   // Hacknet lane state (owned by hacknet-lane)
   const hacknetState = { lastTick: 0, lastHashTick: 0 };
 
-  // Corp lane state
-  const corpState = {};
-
   // Home Upgrade lane state
   const homeUpgradesState = {};
 
@@ -171,6 +165,12 @@ export async function main(ns) {
   // pserv policy memory (so we only log changes)
   const pservPolicyState = {
     lastMode: "", // "cap" | "lift"
+  };
+
+  // Corp daemon lane memory (anti-spam)
+  const corpDaemonState = {
+    lastMissingWarnAt: 0,
+    lastNoRamWarnAt: 0,
   };
 
   // Initial target selection (unless overridden)
@@ -208,7 +208,7 @@ export async function main(ns) {
       primaryTarget = res.primaryTarget;
       hgwTarget = res.hgwTarget;
       lastTargetCompute = res.lastTargetCompute;
-      msgs.push(...res.msgs);
+      msgs.push(...(res.msgs || []));
     }
 
     // ---------------------------------------------------------------------
@@ -253,9 +253,9 @@ export async function main(ns) {
     runDaemonLane(ns, cfg, { primary: primaryTarget, hgw: hgwTarget }, msgs);
 
     // ---------------------------------------------------------------------
-    // 8) Corp lane
+    // 8) Corp daemon (start when corp exists; no auto-kill)
     // ---------------------------------------------------------------------
-    runCorpTick(ns, cfg, corpState, msgs);
+    runCorpDaemonTick(ns, cfg, corpDaemonState, msgs);
 
     // ---------------------------------------------------------------------
     // 9) Home Upgrades Lane
@@ -276,6 +276,65 @@ export async function main(ns) {
     lastMsgs = new Set(msgs.filter(Boolean));
 
     await ns.sleep(cfg.tick);
+  }
+}
+
+// ------------------------------------------------------------
+// Corp daemon helper
+// ------------------------------------------------------------
+
+function runCorpDaemonTick(ns, cfg, state, msgs) {
+  if (!cfg.corp) return;
+
+  const corp = ns.corporation;
+  if (!corp || typeof corp.hasCorporation !== "function") return;
+
+  let has = false;
+  try { has = corp.hasCorporation(); } catch { has = false; }
+  if (!has) return;
+
+  const script = String(cfg.corpDaemon || "bin/corp-daemon.js");
+
+  // If it's already running, do nothing.
+  if (safeBool(() => ns.isRunning(script, "home"), false)) return;
+
+  // If script missing, warn occasionally (not every tick)
+  if (!ns.fileExists(script, "home")) {
+    const now = Date.now();
+    if (now - (state.lastMissingWarnAt || 0) > 60_000) {
+      state.lastMissingWarnAt = now;
+      msgs.push(`[corp] WARN: missing ${script} on home (cannot start corp daemon)`);
+    }
+    return;
+  }
+
+  const need = safeNum(() => ns.getScriptRam(script, "home"), Infinity);
+  const max = safeNum(() => ns.getServerMaxRam("home"), 0);
+  const used = safeNum(() => ns.getServerUsedRam("home"), 0);
+  const free = Math.max(0, max - used);
+  const avail = free - (Number(cfg.reserveRam || 0));
+
+  if (!Number.isFinite(need) || need <= 0) return;
+
+  if (avail < need) {
+    const now = Date.now();
+    if (now - (state.lastNoRamWarnAt || 0) > 60_000) {
+      state.lastNoRamWarnAt = now;
+      msgs.push(`[corp] waiting for RAM to start ${script} (need=${need.toFixed(2)}GB avail=${avail.toFixed(2)}GB reserve=${Number(cfg.reserveRam || 0)}GB)`);
+    }
+    return;
+  }
+
+  const pid = ns.run(script, 1);
+  if (pid > 0) {
+    msgs.push(`[corp] started ${script} (pid=${pid})`);
+  } else {
+    // Rare: run failed (e.g., temporary RAM race). Don't spam.
+    const now = Date.now();
+    if (now - (state.lastNoRamWarnAt || 0) > 60_000) {
+      state.lastNoRamWarnAt = now;
+      msgs.push(`[corp] WARN: failed to start ${script} (ns.run returned ${pid})`);
+    }
   }
 }
 
@@ -314,6 +373,15 @@ function applyPservPolicy(ns, cfg, state, msgs) {
   }
 }
 
+function safeNum(fn, fallback) {
+  try {
+    const v = fn();
+    return Number.isFinite(v) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function safeBool(fn, fallback) {
   try { return Boolean(fn()); } catch { return fallback; }
 }
@@ -331,17 +399,23 @@ function printHelp(ns) {
   ns.tprint("  Uses Singularity for TOR/Darkweb/WSE/invite automation, plus purchase-only augmentation automation.");
   ns.tprint("  Includes optional player automation (default ON): crime->gang->faction work.");
   ns.tprint("  Sets a pserv purchase policy: cap at 2048 until (Formulas.exe + WSE+TIX+4S).");
+  ns.tprint("  Starts a corp daemon automatically once you have a corporation (no auto-kill).");
   ns.tprint("");
-  ns.tprint("Notes");
-  ns.tprint("  - Designed to replace core/startup-home-advanced.js as the only script you manually run.");
-  ns.tprint("  - Does not kill other scripts by default; it only ensures required daemons are running.");
-  ns.tprint("  - pserv cap is enforced via cfg.pservArgs (daemon-lane must pass args to ensureDaemon).");
-  ns.tprint("  - Tick telemetry is written to the script log (tail) instead of the terminal.");
+  ns.tprint("Flags");
+  ns.tprint("  --tick <ms>               Loop cadence (default 15000)");
+  ns.tprint("  --reserveRam <gb>         Keep this much RAM free on home (default 64)");
+  ns.tprint("  --logMode changes|always|silent");
+  ns.tprint("  --hgwMode money|xp");
+  ns.tprint("  --batchTarget <host>      Override target selection");
+  ns.tprint("  --retarget true|false     Periodically re-score targets");
+  ns.tprint("  --retargetEvery <ms>");
+  ns.tprint("  --restartOnRetarget true|false");
+  ns.tprint("  --player true|false");
+  ns.tprint("  --corp true|false         Start corp daemon once corp exists (default true)");
+  ns.tprint("  --corpDaemon <path>       Corp daemon script (default bin/corp-daemon.js)");
   ns.tprint("");
-  ns.tprint("Syntax");
+  ns.tprint("Examples");
   ns.tprint("  run core/controller.js");
-  ns.tprint("  run core/controller.js --tick 5000 --reserveRam 64 --hgwMode xp");
-  ns.tprint("  run core/controller.js --retarget true --restartOnRetarget true");
-  ns.tprint("  run core/controller.js --player false");
-  ns.tprint("  run core/controller.js --help");
+  ns.tprint("  run core/controller.js --tick 5000 --reserveRam 64");
+  ns.tprint("  run core/controller.js --corpDaemon bin/corp-daemon.js");
 }
