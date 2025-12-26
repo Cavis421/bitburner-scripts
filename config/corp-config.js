@@ -7,28 +7,31 @@
 export const CORP_CONFIG = {
   enabled: true,
 
+  // Tick gating for /lib/corp/tick.js (0 = no gating; not recommended)
   tickMs: 5000,
 
   // CAPEX policy (global)
   capex: {
     enabled: true,
 
-    // Max number of capex actions per daemon tick
+    // Max number of capex actions per daemon tick (0 disables capex execution)
     maxActionsPerTick: 8,
 
     // Spend gating
     reserveFunds: 200_000_000,
     maxSpendFrac: 0.80,
 
-    // Anti-spam for actions we can't afford
+    // Anti-spam/cooldown for actions that are blocked/failed
     failCooldownMs: 60_000,
   },
 
-  // Bootstrap targets (used later by bootstrap.js)
+  // Bootstrap targets (used by bootstrap.js planner)
   bootstrap: {
-    enabled: true,
+    enabled: true, // optional kill-switch (capex.enabled is the main gate)
+
     cities: ["Sector-12", "Aevum", "Volhaven", "Chongqing", "New Tokyo", "Ishima"],
     officeSizeTarget: 15,
+
     divisions: [
       { type: "Agriculture", name: "Agri" },
       { type: "Tobacco", name: "Tobacco" },

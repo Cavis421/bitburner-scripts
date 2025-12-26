@@ -93,7 +93,7 @@ export async function main(ns) {
 
     try {
       // Single orchestrator tick owns: maintenance -> exports -> capex
-      runCorpTick(ns, corp, cfg, state, log);
+      await runCorpTick(ns, corp, cfg, state, log);
     } catch (e) {
       ns.tprint(`[corp-daemon] EXCEPTION: ${String(e)}`);
       try { ns.tprint(String(e?.stack || "")); } catch {}
