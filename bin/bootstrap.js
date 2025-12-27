@@ -117,14 +117,42 @@ function getFreeRam(ns) {
   return ns.getServerMaxRam("home") - ns.getServerUsedRam("home");
 }
 
-function isRunning(ns, script, host = "home") {
-  try { return ns.ps(host).some(p => p.filename === script); } catch { return false; }
+function normalizePath(p) {
+  // Bitburner process filenames often omit a leading "/"
+  // Normalize so "/bin/x.js" and "bin/x.js" compare equal.
+  return String(p || "")
+    .trim()
+    .replace(/^[.][/]/, "")   // remove "./"
+    .replace(/^[/]+/, "");    // remove leading "/"
 }
+
+function isRunning(ns, script, host = "home") {
+  const want = normalizePath(script);
+  try {
+    return ns.ps(host).some(p => normalizePath(p.filename) === want);
+  } catch {
+    return false;
+  }
+}
+
+function scriptKillAll(ns, script, host = "home") {
+  const want = normalizePath(script);
+  try {
+    for (const p of ns.ps(host)) {
+      if (normalizePath(p.filename) === want) {
+        ns.kill(p.pid);
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
 function ensureEarlyDaemon(ns, script, threads, args) {
   if (!script) return;
   if (!ns.fileExists(script, "home")) return;
 
-  // If already running, don't duplicate
+  // If already running (normalized), don't duplicate
   if (isRunning(ns, script, "home")) return;
 
   const t = Math.max(1, Math.floor(threads));
@@ -133,13 +161,13 @@ function ensureEarlyDaemon(ns, script, threads, args) {
 
   if (!Number.isFinite(cost) || cost <= 0) return;
   if (cost > free) return;
+
   try {
     ns.run(script, t, ...(args || []));
   } catch {
     // ignore
   }
 }
-
 
 function printHelp(ns) {
   ns.tprint("/bin/bootstrap.js");

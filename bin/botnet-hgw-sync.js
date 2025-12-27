@@ -58,7 +58,7 @@ export async function main(ns) {
 
             if (!needsDeploy) continue;
 
-            ns.tprint(`ðŸ” (re)deploying HGW on ${host}: RAM ${previousRam}GB -> ${maxRam}GB`);
+            ns.tprint(`+ (re)deploying HGW on ${host}: RAM ${previousRam}GB -> ${maxRam}GB`);
             // Only kill this worker (safer than killall), but keep killall if you intentionally want it.
             // Using killall on NPC servers is usually fine, but kill() is more polite to other tooling.
             // ns.killall(host);
