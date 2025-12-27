@@ -1,7 +1,7 @@
 /** @param {NS} ns **/
 export async function main(ns) {
     ns.disableLog("ALL");
-    ns.tail(); // open a small log window
+    ns.ui.openTail(); // open a small log window
 
     while (true) {
         ns.clearLog();
