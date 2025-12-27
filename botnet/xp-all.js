@@ -1,4 +1,4 @@
-/** botnet/xp-all.js
+﻿/** botnet/xp-all.js
  * Hard-switch the entire botnet (home + pservs + NPC) into XP mode + monitor ETA.
  *
  * - Kills ALL other scripts on every rooted server (except this script on home), unless --no-kill.
@@ -43,7 +43,7 @@ export async function main(ns) {
         ["delta", 0],        // levels above current
         ["interval", 10],    // seconds between monitor prints
         ["sample", 10],      // seconds to locally sample XP/sec if file missing/stale
-        ["no-file", false],  // ignore util/xp-throughput.txt and always do local sampling
+        ["no-file", false],  // ignore data/xp-throughput.txt and always do local sampling
         ["no-monitor", false],
     ]);
 
@@ -52,7 +52,7 @@ export async function main(ns) {
         return;
     }
 
-    const metricFile = "util/xp-throughput.txt";
+    const metricFile = "data/xp-throughput.txt";
 
     const dryRun = !!flags["dry-run"];
     const doKill = !flags["no-kill"];
@@ -320,7 +320,7 @@ function printHelp(ns) {
     const script = "botnet/xp-all.js";
 
     ns.tprint("==============================================================");
-    ns.tprint(`HELP — ${script}`);
+    ns.tprint(`HELP â€” ${script}`);
     ns.tprint("==============================================================");
     ns.tprint("");
 
@@ -356,7 +356,7 @@ function printHelp(ns) {
     ns.tprint("  --verify           Verify worker args after deploy (default true).");
     ns.tprint("  --interval <sec>   Monitor print interval (default 10).");
     ns.tprint("  --sample <sec>     Local XP/sec sample window if file missing/stale (default 10).");
-    ns.tprint("  --no-file          Ignore util/xp-throughput.txt and always sample locally.");
+    ns.tprint("  --no-file          Ignore data/xp-throughput.txt and always sample locally.");
     ns.tprint("  --no-monitor       Deploy only; skip monitoring loop.");
     ns.tprint("  --help             Show this help and exit.");
 }

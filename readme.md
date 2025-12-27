@@ -235,3 +235,58 @@ MIT License — free to use, modify, and distribute.
 🤖 Contributions / Pull Requests
 PRs and suggestions are welcome!
 If you have improvements to batching logic, HGW scheduling, Hacknet math, or server orchestration, feel free to contribute.
+
+<!-- BIN-INDEX:START -->
+(Generated file: docs/bin-index.md)
+
+# /bin Command Index
+
+> Auto-generated from printHelp(ns). Do not hand-edit.
+
+Generated: 2025-12-26 22:17:42
+
+## General
+
+| Command | Summary | Usage |
+|---|---|---|
+| /./bin/backdoor-oneshot.js | One-shot backdoor installer. Discovers all servers reachable from home, then: | Usage: |
+| /./bin/basic-trader.js | /bin/basic-trader.js |  |
+| /./bin/bootstrap.js | /bin/bootstrap.js |  |
+| /./bin/botnet-hgw-sync.js | /bin/botnet-hgw-sync.js |  |
+| /./bin/controller.js | //bin/controller.js |  |
+| /./bin/corp-daemon.js | /bin/corp-daemon.js | run /bin/corp-daemon.js [--tickMs <ms>] [--debug] [--resetState] [--once] |
+| /./bin/darkweb-auto-buyer.js | /bin/darkweb-auto-buyer.js |  |
+| /./bin/deploy-net.js | HELP - ${script} |  |
+| /./bin/early-backdoor-helper.js | HELP - ${script} |  |
+| /./bin/early-batcher.js | HELP - ${script} |  |
+| /./bin/find.js | bin/find.js |  |
+| /./bin/gang-manager.js | Adaptive COMBAT gang automation (slightly aggressive). | Usage: |
+| /./bin/net-hwgw-batcher.js | HELP - ${script} |  |
+| /./bin/pserv-manager.js | HELP - ${script} |  |
+| /./bin/root-all.js | HELP - ${script} |  |
+| /./bin/root-and-deploy.js | HELP - ${script} |  |
+| /./bin/startup-home-advanced.js | /bin/startup-home-advanced.js |  |
+| /./bin/timed-net-batcher.js | /bin/timed-net-batcher.js |  |
+| /./bin/timed-net-batcher2.js | HELP - ${script} |  |
+| /./bin/tools/augs.js | Faction tests |  |
+| /./bin/tools/connect-path.js | connect-path.js | run connect-path.js <server> |
+| /./bin/tools/find-juicy-advanced.js | @param {NS} ns |  |
+| /./bin/tools/find-juicy-target.js | Skip servers that are obviously trash or out of reach |  |
+| /./bin/tools/prep-target.js |  |  |
+| /./bin/tools/target-status.js |  |  |
+| /./bin/tools/xp-target-compare.js | bin/tools/xp-target-compare.js |  |
+| /./bin/tools/xp-to-next-level.js | Derive effective multiplier so XP thresholds match your displayed level. |  |
+| /./bin/ui/gang-ui.js | Always-on gang dashboard (live tail). | Usage: |
+| /./bin/ui/hacknet-ui.js | --------------------------------------------------------------------------- |  |
+| /./bin/ui/karma-watch.js | "Secret" karma function (now semi-documented) |  |
+| /./bin/ui/money-tracker.js | Starting snapshot |  |
+| /./bin/ui/network-visualizer.js | Build children lists: parent -> [children] |  |
+| /./bin/ui/ops-dashboard.js | Normalize to "ideal" batch conditions |  |
+| /./bin/ui/process-monitor.js | ------------------------------------------------------------- |  |
+| /./bin/ui/territory-ui.js | Always-on territory dashboard for gangs. | Usage: |
+| /./bin/ui/timed-net-batcher-ui.js | Worker script names (match your batcher) |  |
+| /./bin/ui/xp-throughput-monitor.js | Flags: |  |
+
+
+<!-- BIN-INDEX:END -->
+

@@ -1,4 +1,4 @@
-/** @param {NS} ns */
+﻿/** @param {NS} ns */
 
 // Scan the whole network starting from "home"
 function getAllServers(ns) {
@@ -115,10 +115,10 @@ export async function main(ns) {
     safeExec("botnet/pserv-hgw-sync.js", 1, TARGET);
 
     // Main batcher on home
-    safeExec("core/timed-net-batcher.js", 1, TARGET);
+    safeExec("legacy/shims/core/timed-net-batcher.js", 1, TARGET);
 
     // Root + deploy HGW to NPCs/pservs
-    safeExec("core/root-and-deploy.js", 1, TARGET);
+    safeExec("/bin/root-and-deploy.js", 1, TARGET);
 
     // Quiet Hacknet automation
     ////safeExec("hacknet/hacknet-smart.js", 1);
@@ -128,7 +128,7 @@ export async function main(ns) {
     safeExec("pserv-hgw-status.js", 1);   // or pserv/pserv-status.js
     safeExec("hacknet/hacknet-status.js", 1);     // Hacknet snapshot on startup
     // Optional: one-shot dashboard
-    // safeExec("ui/ops-dashboard.js", 1, TARGET);
+    // safeExec("bin/ui/ops-dashboard.js", 1, TARGET);
 
-    ns.tprint("?? STARTUP-HOME COMPLETE � full automation online.");
+    ns.tprint("?? STARTUP-HOME COMPLETE — full automation online.");
 }

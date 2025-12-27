@@ -1,4 +1,4 @@
-/**
+﻿/**
  * wse/liquidate-and-kill.js
  *
  * Auto-liquidate all stock positions, then optionally kill scripts.
@@ -14,8 +14,8 @@ export async function main(ns) {
 
     ["kill", true],                 // kill scripts after liquidation
     ["kill-self", true],            // kill this script at end
-    ["kill-basic-trader", true],    // kill wse/basic-trader.js if running
-    ["basic-trader-path", "wse/basic-trader.js"],
+    ["kill-basic-trader", true],    // kill /bin/basic-trader.js if running
+    ["basic-trader-path", "/bin/basic-trader.js"],
 
     ["kill-scripts", ""],           // CSV list of scripts to kill (paths)
     ["kill-all", false],            // DANGER: killall on home after liquidation
@@ -83,7 +83,7 @@ export async function main(ns) {
   const host = "home";
 
   if (flags["kill-basic-trader"]) {
-    const path = String(flags["basic-trader-path"] || "wse/basic-trader.js");
+    const path = String(flags["basic-trader-path"] || "/bin/basic-trader.js");
     const killed = killByScript(ns, host, path);
     if (killed > 0) ns.tprint(`liquidate: killed ${killed} instance(s) of ${path} on ${host}.`);
   }
@@ -144,15 +144,15 @@ function printHelp(ns) {
   ns.tprint("Notes");
   ns.tprint("  - Requires stock API access; does not require 4S.");
   ns.tprint("  - Short close is attempted only if shorting is unlocked (BN8 / SF8.2).");
-  ns.tprint("  - By default kills wse/basic-trader.js on home after selling.");
+  ns.tprint("  - By default kills /bin/basic-trader.js on home after selling.");
   ns.tprint("  - Use --kill-all carefully; it will stop EVERYTHING on home.");
   ns.tprint("");
   ns.tprint("Syntax");
   ns.tprint("  run wse/liquidate-and-kill.js");
   ns.tprint("  run wse/liquidate-and-kill.js --kill false                 # liquidate only");
   ns.tprint("  run wse/liquidate-and-kill.js --kill-basic-trader true");
-  ns.tprint("  run wse/liquidate-and-kill.js --basic-trader-path wse/basic-trader.js");
-  ns.tprint("  run wse/liquidate-and-kill.js --kill-scripts core/a.js,core/b.js");
+  ns.tprint("  run wse/liquidate-and-kill.js --basic-trader-path /bin/basic-trader.js");
+  ns.tprint("  run wse/liquidate-and-kill.js --kill-scripts /bin/a.js,/bin/b.js");
   ns.tprint("  run wse/liquidate-and-kill.js --kill-all true               # DANGER");
   ns.tprint("  run wse/liquidate-and-kill.js --help");
 }
