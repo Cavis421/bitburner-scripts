@@ -8,8 +8,9 @@
  *  Includes optional player automation (default ON): crime->gang->faction work.
  *  Sets a pserv purchase policy: cap at 2048 until (Formulas.exe + WSE+TIX+4S).
  *
- *  Corp handling:
- *   - Temporarily disabled (corp rewrite planned).
+ *  Corp handling (UPDATED):
+ *   - Controller will start a corp daemon when a corp exists.
+ *   - Corp is persistent between Aug resets, so we do NOT auto-kill/restart it.
  *
  * Syntax
  *  run bin/controller.js
@@ -34,14 +35,6 @@ import { formatWorkBrief, ensureDaedalusFactionWork } from "/lib/work.js"; // NE
 import { flushLog } from "/lib/logging.js";
 import { runHacknetTick } from "/lib/hacknet-lane.js";
 import { runHomeUpgradesTick } from "/lib/home-upgrades-lane.js";
-
-// bbOS service config integration
-import { getServiceRegistry } from "/lib/os/service-registry.js";
-import {
-  DEFAULT_SERVICE_CONFIG_PATH,
-  loadServiceConfig,
-  getEffectiveEnabledMap,
-} from "/lib/os/service-config.js";
 
 const FLAGS = [
   ["help", false],
@@ -71,11 +64,6 @@ const FLAGS = [
   // Helper scripts you already have
   ["darkwebBuyer", "bin/darkweb-auto-buyer.js"],
 
-  // bbOS service enablement integration
-  ["services", true], // if true: read os-services config and compute enabled map
-  ["servicesFile", DEFAULT_SERVICE_CONFIG_PATH],
-  ["servicesVerbose", false], // if true: log effective enablement map changes
-
   // Singularity automation toggles
   ["autoTor", true],
   ["autoDarkweb", true],
@@ -103,7 +91,7 @@ const FLAGS = [
 
   // Corp daemon
   //["corp", true],              // enable starting corp daemon when corp exists
-  //["corpDaemon", "DISABLED:corp-daemon.js"], // script to run when corp exists
+  //["corpDaemon", "bin/corp-daemon.js"], // script to run when corp exists
 ];
 
 const PLAYER_DEFAULTS = PLAYER_POLICY_DEFAULTS;
@@ -137,12 +125,6 @@ export async function main(ns) {
 
     darkwebBuyer: String(flags.darkwebBuyer),
 
-    // bbOS service enablement
-    services: !!flags.services,
-    servicesFile: String(flags.servicesFile || DEFAULT_SERVICE_CONFIG_PATH),
-    servicesVerbose: !!flags.servicesVerbose,
-    servicesEnabled: null, // filled by applyServiceEnablement()
-
     autoTor: !!flags.autoTor,
     autoDarkweb: !!flags.autoDarkweb,
     autoWse: !!flags.autoWse,
@@ -160,6 +142,10 @@ export async function main(ns) {
 
     // args for pserv manager (daemon-lane should pass these to ensureDaemon)
     pservArgs: [],
+
+    // Corp daemon config
+    // corp: !!flags.corp,
+    // corpDaemon: String(flags.corpDaemon || "bin/corp-daemon.js"),
 
     // Scheduled jobs config
     jobs: !!flags.jobs,
@@ -193,16 +179,14 @@ export async function main(ns) {
     lastMode: "", // "cap" | "lift"
   };
 
+  // Corp daemon lane memory (anti-spam)
+  //const corpDaemonState = {
+   // lastMissingWarnAt: 0,
+   // lastNoRamWarnAt: 0,
+  //};
+
   // Scheduled jobs state (timestamps + throttled warnings)
   const jobState = {};
-
-  // bbOS services enablement memory (anti-spam)
-  const servicesState = {
-    lastSig: "",
-  };
-
-  // Compute enablement once at startup
-  applyServiceEnablement(ns, cfg, servicesState, /*msgs*/ null);
 
   // Initial target selection (unless overridden)
   {
@@ -215,9 +199,6 @@ export async function main(ns) {
   while (true) {
     const msgs = [];
     const tickStart = Date.now();
-
-    // Refresh enablement (cheap; logs only on change)
-    applyServiceEnablement(ns, cfg, servicesState, msgs);
 
     // Scheduled jobs (one-shots that run periodically)
     applyScheduledJobs(ns, cfg, jobState, msgs);
@@ -304,6 +285,11 @@ export async function main(ns) {
     runDaemonLane(ns, cfg, { primary: primaryTarget, hgw: hgwTarget }, msgs);
 
     // ---------------------------------------------------------------------
+    // 8) Corp daemon (start when corp exists; no auto-kill)
+    // ---------------------------------------------------------------------
+    // runCorpDaemonTick(ns, cfg, corpDaemonState, msgs);
+
+    // ---------------------------------------------------------------------
     // 9) Home Upgrades Lane
     // ---------------------------------------------------------------------
     runHomeUpgradesTick(ns, cfg, homeUpgradesState, msgs, shared);
@@ -326,68 +312,70 @@ export async function main(ns) {
 }
 
 // ------------------------------------------------------------
-// bbOS service enablement integration
+// Corp daemon helper
 // ------------------------------------------------------------
-function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
-  if (!cfg.services) {
-    cfg.servicesEnabled = null;
+/*function runCorpDaemonTick(ns, cfg, state, msgs) {
+  if (!cfg.corp) return;
+
+  const corp = ns.corporation;
+  if (!corp || typeof corp.hasCorporation !== "function") return;
+
+  let has = false;
+  try { has = corp.hasCorporation(); } catch { has = false; }
+  if (!has) return;
+
+  const script = String(cfg.corpDaemon || "bin/corp-daemon.js");
+
+  // If it's already running, do nothing.
+  if (safeBool(() => ns.isRunning(script, "home"), false)) return;
+
+  // If script missing, warn occasionally (not every tick)
+  if (!ns.fileExists(script, "home")) {
+    const now = Date.now();
+    if (now - (state.lastMissingWarnAt || 0) > 60_000) {
+      state.lastMissingWarnAt = now;
+      msgs.push(`[corp] WARN: missing ${script} on home (cannot start corp daemon)`);
+    }
     return;
   }
 
-  const registry = getServiceRegistry();
-  const file = String(cfg.servicesFile || DEFAULT_SERVICE_CONFIG_PATH);
+  const need = safeNum(() => ns.getScriptRam(script, "home"), Infinity);
+  const max = safeNum(() => ns.getServerMaxRam("home"), 0);
+  const used = safeNum(() => ns.getServerUsedRam("home"), 0);
+  const free = Math.max(0, max - used);
+  const avail = free - (Number(cfg.reserveRam || 0));
 
-  const conf = loadServiceConfig(ns, file);
-  const effective = getEffectiveEnabledMap(registry, conf);
+  if (!Number.isFinite(need) || need <= 0) return;
 
-  // Keys lanes care about (daemon-lane + jobs)
-  cfg.servicesEnabled = {
-    batcher: !!effective.batcher,
-    botnet: !!effective.botnet,
-    pserv: !!effective.pserv,
-    trader: !!effective.trader,
-    gangManager: !!effective.gangManager,
-    darkwebBuyer: !!effective.darkwebBuyer,
+  if (avail < need) {
+    const now = Date.now();
+    if (now - (state.lastNoRamWarnAt || 0) > 60_000) {
+      state.lastNoRamWarnAt = now;
+      msgs.push(`[corp] waiting for RAM to start ${script} (need=${need.toFixed(2)}GB avail=${avail.toFixed(2)}GB reserve=${Number(cfg.reserveRam || 0)}GB)`);
+    }
+    return;
+  }
 
-    backdoorJob: !!effective.backdoorJob,
-    contractsJob: !!effective.contractsJob,
-  };
-
-  if (!cfg.servicesVerbose) return;
-
-  const sig = [
-    `batcher=${cfg.servicesEnabled.batcher ? "1" : "0"}`,
-    `botnet=${cfg.servicesEnabled.botnet ? "1" : "0"}`,
-    `pserv=${cfg.servicesEnabled.pserv ? "1" : "0"}`,
-    `trader=${cfg.servicesEnabled.trader ? "1" : "0"}`,
-    `gangManager=${cfg.servicesEnabled.gangManager ? "1" : "0"}`,
-    `darkwebBuyer=${cfg.servicesEnabled.darkwebBuyer ? "1" : "0"}`,
-    `backdoorJob=${cfg.servicesEnabled.backdoorJob ? "1" : "0"}`,
-    `contractsJob=${cfg.servicesEnabled.contractsJob ? "1" : "0"}`,
-  ].join("|");
-
-  if (sig !== (state.lastSig || "")) {
-    state.lastSig = sig;
-    const msg =
-      `[os] services (${file}): ` +
-      `batcher=${cfg.servicesEnabled.batcher ? "ON" : "OFF"} ` +
-      `botnet=${cfg.servicesEnabled.botnet ? "ON" : "OFF"} ` +
-      `pserv=${cfg.servicesEnabled.pserv ? "ON" : "OFF"} ` +
-      `trader=${cfg.servicesEnabled.trader ? "ON" : "OFF"} ` +
-      `gangManager=${cfg.servicesEnabled.gangManager ? "ON" : "OFF"} ` +
-      `darkwebBuyer=${cfg.servicesEnabled.darkwebBuyer ? "ON" : "OFF"} ` +
-      `backdoorJob=${cfg.servicesEnabled.backdoorJob ? "ON" : "OFF"} ` +
-      `contractsJob=${cfg.servicesEnabled.contractsJob ? "ON" : "OFF"}`;
-    if (Array.isArray(msgsOrNull)) msgsOrNull.push(msg);
-    else ns.tprint(msg);
+  const pid = ns.run(script, 1);
+  if (pid > 0) {
+    msgs.push(`[corp] started ${script} (pid=${pid})`);
+  } else {
+    // Rare: run failed (e.g., temporary RAM race). Don't spam.
+    const now = Date.now();
+    if (now - (state.lastNoRamWarnAt || 0) > 60_000) {
+      state.lastNoRamWarnAt = now;
+      msgs.push(`[corp] WARN: failed to start ${script} (ns.run returned ${pid})`);
+    }
   }
 }
-
-
+*/
 // ------------------------------------------------------------
 // pserv policy helper (NO restarts here; we just set cfg.pservArgs)
 // ------------------------------------------------------------
 function applyPservPolicy(ns, cfg, state, msgs) {
+  // Cap at 2048 until:
+  // - Formulas.exe exists, AND
+  // - WSE + TIX + 4S Data + 4S TIX all exist
   const hasFormulas = ns.fileExists("Formulas.exe", "home");
 
   const stock = ns.stock;
@@ -399,8 +387,10 @@ function applyPservPolicy(ns, cfg, state, msgs) {
   const wseComplete = hasWSE && hasTIX && has4SData && has4STix;
   const shouldCap = (!hasFormulas || !wseComplete);
 
+  // Update cfg.pservArgs (daemon-lane must pass these to ensureDaemon for pserv)
   cfg.pservArgs = shouldCap ? ["--maxRam", "2048"] : [];
 
+  // One-time log when mode changes
   const mode = shouldCap ? "cap" : "lift";
   if (state.lastMode !== mode) {
     state.lastMode = mode;
@@ -431,48 +421,39 @@ function safeBool(fn, fallback) {
 function applyScheduledJobs(ns, cfg, state, msgs) {
   if (!cfg.jobs) return;
 
-  const enabled = cfg.servicesEnabled || null;
-  const isEnabled = (key) => {
-    if (!enabled) return true;
-    if (!Object.prototype.hasOwnProperty.call(enabled, key)) return true;
-    return !!enabled[key];
-  };
-
   const interval = Math.max(30_000, Number(cfg.jobIntervalMs) || 600_000);
 
-  if (isEnabled("backdoorJob")) {
-    runJob(ns, cfg, state, msgs, {
-      key: "backdoor",
-      script: cfg.backdoorJob,
-      intervalMs: interval,
-      threads: 1,
-      args: [],
-    });
-  }
+  runJob(ns, cfg, state, msgs, {
+    key: "backdoor",
+    script: cfg.backdoorJob,
+    intervalMs: interval,
+    threads: 1,
+    args: [],
+  });
 
-  if (isEnabled("contractsJob")) {
-    runJob(ns, cfg, state, msgs, {
-      key: "contracts",
-      script: cfg.contractsJob,
-      intervalMs: interval,
-      threads: 1,
-      args: [],
-    });
-  }
+  runJob(ns, cfg, state, msgs, {
+    key: "contracts",
+    script: cfg.contractsJob,
+    intervalMs: interval,
+    threads: 1,
+    args: [],
+  });
 }
-
 
 function runJob(ns, cfg, state, msgs, job) {
   const script = String(job.script || "").trim();
   if (!script) return;
 
+  // last-run bookkeeping
   const lastKey = `jobLast_${job.key}`;
   const warnKey = `jobWarn_${job.key}`;
   const now = Date.now();
   const last = Number(state[lastKey] || 0);
 
+  // Don't launch if still running
   if (safeBool(() => ns.isRunning(script, "home"), false)) return;
 
+  // Must exist
   if (!safeBool(() => ns.fileExists(script, "home"), false)) {
     if (now - Number(state[warnKey] || 0) > 60_000) {
       state[warnKey] = now;
@@ -481,8 +462,10 @@ function runJob(ns, cfg, state, msgs, job) {
     return;
   }
 
+  // Interval gate
   if (now - last < job.intervalMs) return;
 
+  // Respect reserveRam (same style as corp daemon)
   const need = safeNum(() => ns.getScriptRam(script, "home"), Infinity) * Math.max(1, Math.floor(job.threads || 1));
   const max = safeNum(() => ns.getServerMaxRam("home"), 0);
   const used = safeNum(() => ns.getServerUsedRam("home"), 0);
@@ -492,6 +475,7 @@ function runJob(ns, cfg, state, msgs, job) {
   if (!Number.isFinite(need) || need <= 0) return;
 
   if (avail < need) {
+    // throttle warn
     if (now - Number(state[warnKey] || 0) > 60_000) {
       state[warnKey] = now;
       msgs.push(`[job:${job.key}] waiting for RAM to start ${script} (need=${need.toFixed(2)}GB avail=${avail.toFixed(2)}GB reserve=${Number(cfg.reserveRam || 0)}GB)`);
@@ -526,6 +510,7 @@ function printHelp(ns) {
   ns.tprint("  Uses Singularity for TOR/Darkweb/WSE/invite automation, plus purchase-only augmentation automation.");
   ns.tprint("  Includes optional player automation (default ON): crime->gang->faction work.");
   ns.tprint("  Sets a pserv purchase policy: cap at 2048 until (Formulas.exe + WSE+TIX+4S).");
+  //ns.tprint("  Starts a corp daemon automatically once you have a corporation (no auto-kill).");
   ns.tprint("");
   ns.tprint("Flags");
   ns.tprint("  --tick <ms>               Loop cadence (default 15000)");
@@ -537,18 +522,15 @@ function printHelp(ns) {
   ns.tprint("  --retargetEvery <ms>");
   ns.tprint("  --restartOnRetarget true|false");
   ns.tprint("  --player true|false");
+  //ns.tprint("  --corp true|false         Start corp daemon once corp exists (default true)");
+  //ns.tprint("  --corpDaemon <path>       Corp daemon script (default bin/corp-daemon.js)");
   ns.tprint("  --jobs true|false         Enable scheduled jobs (default true)");
   ns.tprint("  --jobIntervalMs <ms>      Interval for scheduled jobs (default 600000)");
   ns.tprint("  --backdoorJob <path>      Backdoor job script (default bin/backdoor-oneshot.js)");
   ns.tprint("  --contractsJob <path>     Contracts job script (default bin/contracts-find-and-solve.js)");
   ns.tprint("");
-  ns.tprint("bbOS Services");
-  ns.tprint("  --services true|false         Enable service config gating (default true)");
-  ns.tprint("  --servicesFile <path>         Service config file path (default data/os-services.json)");
-  ns.tprint("  --servicesVerbose true|false  Log enablement changes (default false)");
-  ns.tprint("");
   ns.tprint("Examples");
   ns.tprint("  run bin/controller.js");
   ns.tprint("  run bin/controller.js --tick 5000 --reserveRam 64");
-  ns.tprint("  run bin/controller.js --servicesVerbose true");
+  //ns.tprint("  run bin/controller.js --corpDaemon bin/corp-daemon.js");
 }

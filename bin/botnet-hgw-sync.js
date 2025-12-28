@@ -13,7 +13,7 @@ export async function main(ns) {
     // Positional args
     const target = flags._[0] || "omega-net";
     const mode = String(flags._[1] || "xp").toLowerCase();
-    const workerScript = "/botnet/remote-hgw.js";
+    const workerScript = "botnet/remote-hgw.js";
 
     if (!ns.fileExists(workerScript, "home")) {
         ns.tprint(`[X] ${workerScript} not found on home.`);

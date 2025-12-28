@@ -1,46 +1,48 @@
-﻿/** @param {NS} ns */
-
-
-/*
+﻿/**
  * /bin/bootstrap.js
  *
  * Description
- *  Minimal BN-restart-safe launcher.
- *  Keeps RAM tiny by avoiding heavy imports.
- *
- *  While waiting for home RAM to be sufficient, it can keep a lightweight
- *  "early daemon" running (default: /bin/botnet-hgw-sync.js).
+ *  Minimal BN-restart-safe launcher that starts the heavy controller only when home has enough free RAM.
+ *  While waiting, it can keep one or more lightweight early daemons running.
  *
  * Notes
- *  - Designed to be the "first script you run" after reset.
- *  - Early daemon is best-effort: starts only if not already running and affordable.
- *  - By default, early daemon is stopped right before starting /bin/controller.js
- *    to help meet the free-RAM gate.
+ *  - Avoids heavy imports to keep RAM cost tiny.
+ *  - Early daemons are best-effort and will only start if affordable.
+ *  - If --stopEarly true, early daemons are stopped right before starting the controller.
  *
  * Syntax
  *  run /bin/bootstrap.js
  *  run /bin/bootstrap.js --controllerRam 700 --poll 5000
- *  run /bin/bootstrap.js --early /bin/botnet-hgw-sync.js -- n00dles money
- *  run /bin/bootstrap.js --early /bin/early-hgw.js -- n00dles
+ *  run /bin/bootstrap.js --early "/bin/startup-home-advanced.js"
+ *  run /bin/bootstrap.js --earlyList "/bin/startup-home-advanced.js,/bin/botnet-hgw-sync.js"
  *  run /bin/bootstrap.js --stopEarly false
  *  run /bin/bootstrap.js --help
  */
+
+/** @param {NS} ns */
 
 const FLAGS = [
   ["help", false],
   // Heavy controller
   ["controller", "/bin/controller.js"],
   ["controllerThreads", 1],
-  ["controllerRam", 700],        // how much FREE home RAM required to start controller
-  // Early daemon (runs while waiting)
-  ["early", "/bin/botnet-hgw-sync.js"], // set "" to disable
+  ["controllerRam", 1000],        // how much FREE home RAM required to start controller
+
+  // Early daemon(s)
+  // Back-compat single early script:
+  ["early", "/bin/startup-home-advanced.js"], // set "" to disable
+  // New: comma-separated list of early scripts (overrides --early if provided)
+  ["earlyList", ""], // e.g. "/bin/startup-home-advanced.js,/bin/botnet-hgw-sync.js"
   ["earlyThreads", 1],
-  ["stopEarly", true],           // stop early daemon right before launching controller
+  ["stopEarly", true],           // stop early daemon(s) right before launching controller
+
   // Loop cadence
   ["poll", 5000],
+
   // Behavior
   ["exitAfterStart", true],
 ];
+
 export async function main(ns) {
   const flags = ns.flags(FLAGS);
   if (flags.help) {
@@ -55,55 +57,78 @@ export async function main(ns) {
   const needFree = Math.max(0, Number(flags.controllerRam) || 0);
   const controllerThreads = Math.max(1, Math.floor(Number(flags.controllerThreads) || 1));
   const exitAfterStart = !!flags.exitAfterStart;
-  const early = String(flags.early || "").trim();
-  const earlyThreads = Math.max(1, Math.floor(Number(flags.earlyThreads) || 1));
-  const stopEarly = !!flags.stopEarly;
 
-  // Pass-through args after `--` go to the early daemon
+  const stopEarly = !!flags.stopEarly;
+  const earlyThreads = Math.max(1, Math.floor(Number(flags.earlyThreads) || 1));
+
+  // Pass-through args after `--` go to the early daemon(s)
   // Example: run /bin/bootstrap.js -- n00dles money
   const earlyArgs = flags._.slice(0);
 
+  // Determine early scripts:
+  // - If earlyList provided, use that
+  // - Else fall back to `early`
+  const earlyList = parseEarlyList(String(flags.earlyList || "").trim());
+  const earlySingle = String(flags.early || "").trim();
+
+  /** @type {string[]} */
+  const earlyScripts = (earlyList.length > 0)
+    ? earlyList
+    : (earlySingle ? [earlySingle] : []);
+
+  // Normalize: allow "bin/x.js" or "/bin/x.js" — ensure leading "/"
+  const earlyScriptsNorm = earlyScripts
+    .map(s => String(s || "").trim())
+    .filter(Boolean)
+    .map(s => s.startsWith("/") ? s : ("/" + s));
+
+  const controllerNorm = controller.startsWith("/") ? controller : ("/" + controller);
+
   while (true) {
-    const alreadyRunning = isRunning(ns, controller, "home");
-    if (alreadyRunning) return;
-
-    // 1) Keep early daemon running (best-effort) while we wait
-    ensureEarlyDaemon(ns, early, earlyThreads, earlyArgs);
-
-    // 2) Controller gate checks
-    if (!ns.fileExists(controller, "home")) {
-      ns.print(`[bootstrap] missing ${controller}; waiting...`);
-      await ns.sleep(poll);
-      continue;
+    // Keep early daemon(s) alive while waiting
+    for (const s of earlyScriptsNorm) {
+      ensureEarlyDaemon(ns, s, earlyThreads, earlyArgs);
     }
 
-    const free = getFreeRam(ns);
-    if (free < needFree) {
-      ns.print(`[bootstrap] waiting: freeRam=${free.toFixed(1)} need=${needFree}`);
-      await ns.sleep(poll);
-      continue;
-    }
-
-    // 3) Optionally stop early daemon to free RAM, then launch controller
-    if (stopEarly && early) {
-      // Kill all instances regardless of args (simple + safe)
-      try { ns.scriptKill(early, "home"); } catch {}
-      await ns.sleep(0);
-    }
-
+    // Attempt to start controller if affordable
     const freeAfter = getFreeRam(ns);
     if (freeAfter < needFree) {
-      ns.print(`[bootstrap] controller gate not met after stopping early daemon. freeRam=${freeAfter.toFixed(1)} need=${needFree}`);
       await ns.sleep(poll);
       continue;
     }
 
-    const pid = ns.run(controller, controllerThreads);
+    if (!ns.fileExists(controllerNorm, "home")) {
+      ns.tprint(`[bootstrap] ERROR: controller missing on home: ${controllerNorm}`);
+      return;
+    }
+
+    const controllerCost = ns.getScriptRam(controllerNorm, "home") * controllerThreads;
+    if (!Number.isFinite(controllerCost) || controllerCost <= 0) {
+      ns.tprint(`[bootstrap] ERROR: controller RAM cost invalid: ${controllerNorm}`);
+      return;
+    }
+
+    if (controllerCost > getFreeRam(ns)) {
+      await ns.sleep(poll);
+      continue;
+    }
+
+    // Stop early daemon(s) just before launching controller if configured
+    if (stopEarly && earlyScriptsNorm.length > 0) {
+      for (const s of earlyScriptsNorm) {
+        tryStop(ns, s, "home");
+      }
+      // Give a moment for RAM to free up
+      await ns.sleep(50);
+    }
+
+    const pid = ns.run(controllerNorm, controllerThreads);
     if (pid) {
-      ns.tprint(`[bootstrap] started ${controller} (pid=${pid}) freeRam=${freeAfter.toFixed(1)}`);
+      ns.tprint(`[bootstrap] started ${controllerNorm} (pid=${pid}) freeRam=${getFreeRam(ns).toFixed(1)}`);
       if (exitAfterStart) return;
     } else {
-      ns.print(`[bootstrap] failed to start controller (pid=0). freeRam=${freeAfter.toFixed(1)}`);
+      // Rare: run failed (race) — keep looping
+      ns.tprint(`[bootstrap] WARN: failed to start ${controllerNorm} (ns.run returned ${pid})`);
     }
 
     await ns.sleep(poll);
@@ -111,38 +136,28 @@ export async function main(ns) {
 }
 
 // ------------------------------------------------------------
-// Helpers
+// Helpers (keep tiny; no imports)
 // ------------------------------------------------------------
+
 function getFreeRam(ns) {
-  return ns.getServerMaxRam("home") - ns.getServerUsedRam("home");
+  const max = ns.getServerMaxRam("home");
+  const used = ns.getServerUsedRam("home");
+  return Math.max(0, max - used);
 }
 
-function normalizePath(p) {
-  // Bitburner process filenames often omit a leading "/"
-  // Normalize so "/bin/x.js" and "bin/x.js" compare equal.
-  return String(p || "")
-    .trim()
-    .replace(/^[.][/]/, "")   // remove "./"
-    .replace(/^[/]+/, "");    // remove leading "/"
-}
-
-function isRunning(ns, script, host = "home") {
-  const want = normalizePath(script);
+function isRunning(ns, script, host) {
   try {
-    return ns.ps(host).some(p => normalizePath(p.filename) === want);
+    // normalize slashes just in case
+    const s = String(script || "");
+    return ns.isRunning(s, host);
   } catch {
     return false;
   }
 }
 
-function scriptKillAll(ns, script, host = "home") {
-  const want = normalizePath(script);
+function tryStop(ns, script, host) {
   try {
-    for (const p of ns.ps(host)) {
-      if (normalizePath(p.filename) === want) {
-        ns.kill(p.pid);
-      }
-    }
+    if (isRunning(ns, script, host)) ns.scriptKill(script, host);
   } catch {
     // ignore
   }
@@ -169,25 +184,49 @@ function ensureEarlyDaemon(ns, script, threads, args) {
   }
 }
 
+function parseEarlyList(listStr) {
+  if (!listStr) return [];
+  return listStr
+    .split(",")
+    .map(s => String(s || "").trim())
+    .filter(Boolean);
+}
+
+// ------------------------------------------------------------
+// Help
+// ------------------------------------------------------------
 function printHelp(ns) {
   ns.tprint("/bin/bootstrap.js");
   ns.tprint("");
   ns.tprint("Description");
   ns.tprint("  Minimal BN-restart-safe launcher that starts /bin/controller.js only when home has enough free RAM.");
-  ns.tprint("  While waiting, it can keep a lightweight early daemon running (default: /bin/botnet-hgw-sync.js).");
+  ns.tprint("  While waiting, it can keep one or more lightweight early daemons running.");
   ns.tprint("");
   ns.tprint("Notes");
   ns.tprint("  - Avoids heavy imports to keep RAM cost tiny.");
-  ns.tprint("  - Early daemon is best-effort and will only start if affordable.");
-  ns.tprint("  - By default, early daemon is stopped right before starting the heavy controller.");
+  ns.tprint("  - Early daemons are best-effort and will only start if affordable.");
+  ns.tprint("  - By default, early daemons are stopped right before starting the heavy controller.");
   ns.tprint("");
   ns.tprint("Syntax");
   ns.tprint("  run /bin/bootstrap.js");
   ns.tprint("  run /bin/bootstrap.js --controllerRam 700 --poll 5000");
-  ns.tprint('  run /bin/bootstrap.js --early /bin/botnet-hgw-sync.js -- n00dles money');
-  ns.tprint('  run /bin/bootstrap.js --early /bin/early-hgw.js -- n00dles');
+  ns.tprint("  run /bin/bootstrap.js --early \"/bin/startup-home-advanced.js\"");
+  ns.tprint("  run /bin/bootstrap.js --earlyList \"/bin/startup-home-advanced.js,/bin/botnet-hgw-sync.js\"");
   ns.tprint("  run /bin/bootstrap.js --stopEarly false");
   ns.tprint("  run /bin/bootstrap.js --help");
+  ns.tprint("");
+  ns.tprint("Flags");
+  ns.tprint("  --controller <path>       Controller script (default /bin/controller.js)");
+  ns.tprint("  --controllerThreads <n>   Threads to run controller (default 1)");
+  ns.tprint("  --controllerRam <gb>      Free RAM required before starting controller (default 700)");
+  ns.tprint("  --early <path>            Single early daemon (default /bin/startup-home-advanced.js). Set \"\" to disable.");
+  ns.tprint("  --earlyList <csv>         Comma-separated early daemons. Overrides --early if provided.");
+  ns.tprint("  --earlyThreads <n>        Threads for each early daemon (default 1)");
+  ns.tprint("  --stopEarly true|false    Stop early daemon(s) before starting controller (default true)");
+  ns.tprint("  --poll <ms>               Poll interval while waiting (default 5000)");
+  ns.tprint("  --exitAfterStart true|false  Exit after launching controller (default true)");
+  ns.tprint("");
+  ns.tprint("Notes");
+  ns.tprint("  Pass-through args after `--` are forwarded to early daemon(s).");
+  ns.tprint("  Example: run /bin/bootstrap.js -- n00dles money");
 }
-
-

@@ -1,4 +1,6 @@
 import { solvers } from "lib/solvers.js";
+const disabledTypes = new Set();
+
 
 /**
  * bin/find-and-solve.js
@@ -98,9 +100,14 @@ export function getContracts(ns, flags) {
 }
 
 export async function attemptContract(ns, contract, flags) {
-    const solver = solvers[contract.type];
+    if (disabledTypes.has(contract.type)) {
+        if (!flags.quiet) ns.print(`SKIP: Solver disabled for "${contract.type}" (previous failure this run).`);
+        return;
+        }
 
+    const solver = solvers[contract.type];
     if (!solver) {
+
         if (!flags.quiet) ns.print(`WARNING: No solver for "${contract.type}" on ${contract.host}`);
         return;
     }
@@ -113,6 +120,20 @@ export async function attemptContract(ns, contract, flags) {
         const solution = flags["no-worker"]
             ? solver(data)
             : await runInWebWorker(solver, [data], Number(flags.timeout) || 5_000);
+
+        // Guard: verify Compression III output before burning a contract try
+        if (contract.type === "Compression III: LZ Compression") {
+            const dec = solvers["Compression II: LZ Decompression"];
+            if (
+                typeof solution !== "string" ||
+                !dec ||
+                dec(solution) !== String(data)
+            ) {
+                throw new Error(
+                    "Compression III produced invalid encoding (self-check failed). Skipping attempt."
+                );
+            }
+        }
 
         if (flags["dry-run"]) {
             ns.tprint(`[DRY-RUN] Would attempt "${contract.type}" on ${contract.host}:${contract.file} with solution: ${formatSolution(solution)}`);
@@ -127,7 +148,7 @@ export async function attemptContract(ns, contract, flags) {
         } else {
             ns.tprint(`ERROR: Failed to solve "${contract.type}" on ${contract.host} (${contract.file})`);
             // Disable this solver type for this run (prevents burning tries on the same wrong solver)
-            delete solvers[contract.type];
+           disabledTypes.add(contract.type);
         }
     } catch (error) {
         ns.print(`ERROR solving "${contract.type}" on ${contract.host}: ${String(error)}`);
