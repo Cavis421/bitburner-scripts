@@ -1,0 +1,18 @@
+# Normalize text files on commit
+* text=auto
+
+# Explicitly treat these as text
+*.js text
+*.ts text
+*.json text
+*.txt text
+*.md text
+*.ns text
+
+# Bitburner / JS projects on Windows: keep CRLF in working tree, store LF in repo
+# (This prevents "mixed endings" and makes diffs clean across OSes.)
+*.js  text eol=lf
+*.ts  text eol=lf
+*.json text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf
