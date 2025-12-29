@@ -4,15 +4,16 @@
  * Description
  *  Staged bootstrap workflow (HOME MAX RAM milestones):
  *    1) Stage A: run early-money while home MAX RAM < 64GB
- *    2) Stage B: run startup-home-advanced while 64GB <= home MAX RAM < 1024GB
- *    3) Stage C: start controller when home MAX RAM >= 1024GB (and it fits)
+ *    2) Stage B: run startup-home-advanced ONCE while 64GB <= home MAX RAM < 1024GB
+ *    3) Stage C: start controller when home MAX RAM >= 1024GB (and it fits in FREE RAM)
  *
  *  On ANY stage switch, bootstrap kills "all workers" by killing all scripts on home
  *  except an allowlist (bootstrap itself only).
  *
  * Notes
- *  - Avoids heavy imports to keep RAM cost tiny.
- *  - Stage scripts are best-effort and only started if affordable.
+ *  - Avoids imports to keep RAM cost tiny.
+ *  - Stage1 is treated like a daemon (kept running).
+ *  - Stage2 is a one-shot launcher (run once per entry into Stage2).
  *  - Controller launch requires the script RAM cost to fit in FREE RAM at the moment of launch.
  *
  * Syntax
@@ -38,8 +39,8 @@ const FLAGS = [
   ["controllerThreads", 1],
 
   // Behavior
-  ["killWorkersOnSwitch", true],       // kill all non-allowlisted scripts on any stage switch
-  ["exitAfterControllerStart", true],  // exit once controller starts
+  ["killWorkersOnSwitch", true],
+  ["exitAfterControllerStart", true],
   ["poll", 5000],
 ];
 
@@ -60,7 +61,7 @@ export async function main(ns) {
   const stage1Script = normPath(String(flags.stage1 || "").trim());
   const stage2Script = normPath(String(flags.stage2 || "").trim());
 
-  const controllerScript = normPath(String(flags.controller || "/bin/controller.js"));
+  const controllerScript = normPath(String(flags.controller || "bin/controller.js").trim());
   const controllerThreads = Math.max(1, Math.floor(Number(flags.controllerThreads) || 1));
 
   const killWorkersOnSwitch = !!flags.killWorkersOnSwitch;
@@ -72,6 +73,9 @@ export async function main(ns) {
   /** @type {"stage1"|"stage2"|"controller"|null} */
   let lastMode = null;
 
+  // Stage2 must only be started once per entry into stage2
+  let stage2Started = false;
+
   while (true) {
     const homeMax = ns.getServerMaxRam("home");
 
@@ -80,48 +84,65 @@ export async function main(ns) {
         : homeMax < stage2Ram ? "stage2"
           : "controller";
 
-    // If we are switching stages, perform cleanup first
+    // ------------------------------------------------------------
+    // Stage transition: cleanup + latches
+    // ------------------------------------------------------------
     if (mode !== lastMode) {
       if (killWorkersOnSwitch) {
-        const allow = buildAllowListForMode(mode);
+        const allow = buildAllowList();
         const killed = killAllExcept(ns, "home", allow);
-
-        if (lastMode !== null) {
-          ns.tprint(`[bootstrap] switch ${lastMode} -> ${mode} | killed=${killed}`);
-        }
+        ns.tprint(lastMode
+          ? `[bootstrap] switch ${lastMode} -> ${mode} | killed=${killed}`
+          : `[bootstrap] start in ${mode} | killed=${killed}`
+        );
+      } else if (lastMode === null) {
+        ns.tprint(`[bootstrap] start in ${mode}`);
       }
 
+      // Reset stage2 latch when entering stage2
+      if (mode === "stage2") stage2Started = false;
+
+      // Give RAM accounting a moment to settle
       await ns.sleep(50);
       lastMode = mode;
     }
 
-    // -------------------------
-    // Stage 1: early-money
-    // -------------------------
+    // ------------------------------------------------------------
+    // Stage 1: early-money (daemon style)
+    // ------------------------------------------------------------
     if (mode === "stage1") {
-      // Ensure stage2 isn't lingering (extra safety)
+      // Extra safety: don't allow stage2/controller overlap
       tryStop(ns, stage2Script, "home");
+      tryStop(ns, controllerScript, "home");
 
       ensureDaemonBestEffort(ns, stage1Script, 1, passthroughArgs);
       await ns.sleep(poll);
       continue;
     }
 
-    // -------------------------
-    // Stage 2: startup-home-advanced
-    // -------------------------
+    // ------------------------------------------------------------
+    // Stage 2: startup-home-advanced (ONE-SHOT)
+    // ------------------------------------------------------------
     if (mode === "stage2") {
-      // Ensure stage1 isn't lingering (extra safety)
+      // Extra safety: don't allow stage1/controller overlap
       tryStop(ns, stage1Script, "home");
+      tryStop(ns, controllerScript, "home");
 
-      ensureDaemonBestEffort(ns, stage2Script, 1, passthroughArgs);
+      if (!stage2Started) {
+        const started = ensureDaemonBestEffort(ns, stage2Script, 1, passthroughArgs);
+        if (started) {
+          ns.tprint(`[bootstrap] stage2 started one-shot: ${stage2Script}`);
+          stage2Started = true;
+        }
+      }
+
       await ns.sleep(poll);
       continue;
     }
 
-    // -------------------------
+    // ------------------------------------------------------------
     // Stage 3: controller
-    // -------------------------
+    // ------------------------------------------------------------
     // Hard guarantee: no overlap with stage scripts
     tryStop(ns, stage1Script, "home");
     tryStop(ns, stage2Script, "home");
@@ -170,9 +191,8 @@ export async function main(ns) {
 // ------------------------------------------------------------
 
 function normPath(p) {
-  const s = String(p || "").trim();
-  if (!s) return "";
-  return s.startsWith("/") ? s : ("/" + s);
+  // Your repo uses "bin/..." paths; strip leading "/" if present.
+  return String(p || "").trim().replace(/^\/+/, "");
 }
 
 function getFreeRam(ns) {
@@ -188,43 +208,35 @@ function isRunning(ns, script, host) {
 function tryStop(ns, script, host) {
   try {
     if (script && isRunning(ns, script, host)) ns.scriptKill(script, host);
-  } catch {
-    // ignore
-  }
+  } catch { /* ignore */ }
 }
 
 function ensureDaemonBestEffort(ns, script, threads, args) {
-  if (!script) return;
-  if (!ns.fileExists(script, "home")) return;
-  if (isRunning(ns, script, "home")) return;
+  if (!script) return false;
+  if (!ns.fileExists(script, "home")) return false;
+  if (isRunning(ns, script, "home")) return false;
 
   const t = Math.max(1, Math.floor(Number(threads) || 1));
   const cost = ns.getScriptRam(script, "home") * t;
   const free = getFreeRam(ns);
 
-  if (!Number.isFinite(cost) || cost <= 0) return;
-  if (cost > free) return;
+  if (!Number.isFinite(cost) || cost <= 0) return false;
+  if (cost > free) return false;
 
-  try { ns.run(script, t, ...(args || [])); } catch { /* ignore */ }
+  try {
+    const pid = ns.run(script, t, ...(args || []));
+    return pid > 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
  * Allowlist for stage switching.
  * For your stated goal ("kill all workers"), we only preserve bootstrap itself.
  */
-function buildAllowListForMode(mode) {
-  void mode; // mode currently unused (kept for future tweaks)
-
-  const allow = new Set();
-  allow.add("/bin/bootstrap.js");
-  allow.add("bin/bootstrap.js");
-
-  // Add both forms for safety
-  for (const s of Array.from(allow)) {
-    if (s.startsWith("/")) allow.add(s.slice(1));
-  }
-
-  return allow;
+function buildAllowList() {
+  return new Set(["bin/bootstrap.js"]);
 }
 
 /**
@@ -236,16 +248,13 @@ function killAllExcept(ns, host, allowSet) {
   const procs = safeArr(() => ns.ps(host), []);
   for (const p of procs) {
     const file = String(p.filename || "");
-    const fileNoLead = file.startsWith("/") ? file.slice(1) : file;
-
-    if (allowSet.has(file) || allowSet.has(fileNoLead)) continue;
+    if (allowSet.has(file)) continue;
 
     try {
+      // Kill by filename (kills all instances). Matches your "kill all workers" intent.
       ns.scriptKill(file, host);
       killed++;
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
   }
   return killed;
 }
@@ -266,7 +275,7 @@ function printHelp(ns) {
   ns.tprint("Description");
   ns.tprint("  Staged bootstrap workflow:");
   ns.tprint("    1) early-money while home MAX RAM < 64GB");
-  ns.tprint("    2) startup-home-advanced while home MAX RAM < 1024GB");
+  ns.tprint("    2) startup-home-advanced ONE-SHOT while home MAX RAM < 1024GB");
   ns.tprint("    3) start controller when home MAX RAM >= 1024GB and controller fits in FREE RAM");
   ns.tprint("  On any stage switch, kills all non-allowlisted scripts on home (\"kill all workers\").");
   ns.tprint("");
@@ -277,11 +286,11 @@ function printHelp(ns) {
   ns.tprint("  run /bin/bootstrap.js --help");
   ns.tprint("");
   ns.tprint("Flags");
-  ns.tprint("  --stage1 <path>               Stage1 script (default /bin/early-money.js)");
+  ns.tprint("  --stage1 <path>               Stage1 script (default bin/early-money.js)");
   ns.tprint("  --stage1Ram <gb>              Stage1 cutoff home MAX RAM (default 64)");
-  ns.tprint("  --stage2 <path>               Stage2 script (default /bin/startup-home-advanced.js)");
+  ns.tprint("  --stage2 <path>               Stage2 script (default bin/startup-home-advanced.js)");
   ns.tprint("  --stage2Ram <gb>              Stage2 cutoff home MAX RAM (default 1024)");
-  ns.tprint("  --controller <path>           Controller script (default /bin/controller.js)");
+  ns.tprint("  --controller <path>           Controller script (default bin/controller.js)");
   ns.tprint("  --controllerThreads <n>       Controller threads (default 1)");
   ns.tprint("  --killWorkersOnSwitch t|f      Kill all scripts on home except bootstrap (default true)");
   ns.tprint("  --exitAfterControllerStart t|f Exit after starting controller (default true)");

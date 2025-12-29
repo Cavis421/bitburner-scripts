@@ -558,7 +558,12 @@ export async function main(ns) {
 
   const myPid = ns.pid;
 
-  const keepFiles = new Set(["bin/bootstrap.js"]);
+  // Keep bootstrap AND controller safe from being killed by startup-home-advanced.
+  const keepFiles = new Set([
+    "bin/bootstrap.js",
+    "bin/controller.js",
+  ]);
+
   const processes = ns.ps("home");
 
   for (const p of processes) {
@@ -566,6 +571,7 @@ export async function main(ns) {
     if (keepFiles.has(p.filename)) continue;
     ns.kill(p.pid);
   }
+
 
   await ns.sleep(200);
 
@@ -760,5 +766,3 @@ function printHelp(ns) {
   ns.tprint("  run bin/startup-home-advanced.js omega-net --hgw money --extras ui");
   ns.tprint("  run bin/startup-home-advanced.js --help");
 }
-
-// ooo fixed
