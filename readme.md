@@ -1,7 +1,7 @@
 ﻿# Bitburner Scripts â€“ Master Codebase
 This repository contains my **production Bitburner codebase**, structured and maintained for long-running playthroughs, automation, and iterative refactors.
 **Source of truth:** everything under `bb/`
-If it isnâ€™t in `bb/`, it does **not** exist in the game.
+If it isnt in `bb/`, it does **not** exist in the game.
 ---
 ## Repository Structure
 /
