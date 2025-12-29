@@ -64,9 +64,11 @@ const FLAGS = [
   // Must-have scripts (your list)
   ["batcher", "bin/timed-net-batcher2.js"],
   ["botnet", "bin/botnet-hgw-sync.js"],
-  ["pserv",  "bin/pserv-manager.js"],
+  ["pserv", "bin/pserv-manager.js"],
   ["trader", "bin/basic-trader.js"],
   ["gangManager", "bin/gang-manager.js"],
+  ["intTrainer", "bin/intelligence-trainer.js"],
+
 
   // Helper scripts you already have
   ["darkwebBuyer", "bin/darkweb-auto-buyer.js"],
@@ -134,7 +136,7 @@ export async function main(ns) {
     pserv: String(flags.pserv),
     trader: String(flags.trader),
     gangManager: String(flags.gangManager),
-
+    intTrainer: String(flags.intTrainer),
     darkwebBuyer: String(flags.darkwebBuyer),
 
     // bbOS service enablement
@@ -347,6 +349,7 @@ function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
     pserv: !!effective.pserv,
     trader: !!effective.trader,
     gangManager: !!effective.gangManager,
+    intTrainer: !!effective.intTrainer,
     darkwebBuyer: !!effective.darkwebBuyer,
 
     backdoorJob: !!effective.backdoorJob,
@@ -361,6 +364,7 @@ function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
     `pserv=${cfg.servicesEnabled.pserv ? "1" : "0"}`,
     `trader=${cfg.servicesEnabled.trader ? "1" : "0"}`,
     `gangManager=${cfg.servicesEnabled.gangManager ? "1" : "0"}`,
+    `intTrainer=${cfg.servicesEnabled.intTrainer ? "1" : "0"}`,
     `darkwebBuyer=${cfg.servicesEnabled.darkwebBuyer ? "1" : "0"}`,
     `backdoorJob=${cfg.servicesEnabled.backdoorJob ? "1" : "0"}`,
     `contractsJob=${cfg.servicesEnabled.contractsJob ? "1" : "0"}`,
@@ -375,6 +379,7 @@ function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
       `pserv=${cfg.servicesEnabled.pserv ? "ON" : "OFF"} ` +
       `trader=${cfg.servicesEnabled.trader ? "ON" : "OFF"} ` +
       `gangManager=${cfg.servicesEnabled.gangManager ? "ON" : "OFF"} ` +
+      `intTrainer=${cfg.servicesEnabled.intTrainer ? "ON" : "OFF"} ` +
       `darkwebBuyer=${cfg.servicesEnabled.darkwebBuyer ? "ON" : "OFF"} ` +
       `backdoorJob=${cfg.servicesEnabled.backdoorJob ? "ON" : "OFF"} ` +
       `contractsJob=${cfg.servicesEnabled.contractsJob ? "ON" : "OFF"}`;
@@ -539,6 +544,7 @@ function printHelp(ns) {
   ns.tprint("  --jobIntervalMs <ms>      Interval for scheduled jobs (default 600000)");
   ns.tprint("  --backdoorJob <path>      Backdoor job script (default bin/backdoor-oneshot.js)");
   ns.tprint("  --contractsJob <path>     Contracts job script (default bin/contracts-find-and-solve.js)");
+  ns.tprint("  --intTrainer <path>      Intelligence trainer daemon (default bin/intelligence-trainer.js)");
   ns.tprint("");
   ns.tprint("bbOS Services");
   ns.tprint("  --services true|false         Enable service config gating (default true)");

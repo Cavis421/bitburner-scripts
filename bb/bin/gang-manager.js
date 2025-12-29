@@ -235,12 +235,12 @@ export async function main(ns) {
         inEndgame || recovery
           ? 0
           : ramp(
-              clash.median,
-              cfg.engageMedianMin,
-              cfg.territoryFracRampAt,
-              cfg.territoryMinFrac,
-              cfg.territoryMaxFrac
-            );
+            clash.median,
+            cfg.engageMedianMin,
+            cfg.territoryFracRampAt,
+            cfg.territoryMinFrac,
+            cfg.territoryMaxFrac
+          );
 
       // If we're near-capped on territory, taper TW fraction down toward territoryTaperTo
       if (!inEndgame && !recovery && g.territory >= cfg.territoryTaperAt) {
@@ -250,6 +250,7 @@ export async function main(ns) {
       }
 
       // --- PRELIM decision (used to evaluate gear + next-cost) ---
+      // DROP-IN FIX: pass current territory so TW cap only applies during tapering
       const prelimDecision = assignCombatTasksAndTiers(ns, names, cfg, {
         recovery,
         vigiFrac,
@@ -257,6 +258,7 @@ export async function main(ns) {
         territoryFrac: territoryFracBase,
         minTrain: dyn.minTrain,
         wantedPenalty: g.wantedPenalty,
+        territory: g.territory, // <-- NEW
       });
 
       // --- Equipment catch-up mode ---
@@ -286,6 +288,7 @@ export async function main(ns) {
       const finalTerritoryFrac = cashFarm ? cfg.cashFarmTerritoryFrac : territoryFracBase;
 
       // --- FINAL decision (after cashFarm overrides) ---
+      // DROP-IN FIX: pass current territory so TW cap only applies during tapering
       const decision = assignCombatTasksAndTiers(ns, names, cfg, {
         recovery,
         vigiFrac,
@@ -293,6 +296,7 @@ export async function main(ns) {
         territoryFrac: finalTerritoryFrac,
         minTrain: dyn.minTrain,
         wantedPenalty: g.wantedPenalty,
+        territory: g.territory, // <-- NEW
       });
 
       // Engage/disengage logic (more aggressive than "worst chance")
@@ -314,7 +318,7 @@ export async function main(ns) {
           ns,
           cfg,
           `[gang] warfare ${engaged ? "ENABLED" : "disabled"} ` +
-            `(median=${(clash.median * 100).toFixed(1)}%, gte${Math.round(cfg.engageNChanceMin * 100)}=${clash.countGteNChanceMin})`
+          `(median=${(clash.median * 100).toFixed(1)}%, gte${Math.round(cfg.engageNChanceMin * 100)}=${clash.countGteNChanceMin})`
         );
       }
 
@@ -471,6 +475,11 @@ function pickRespectTaskCapped(cfg, minCombat, wantedPenalty) {
  * - if recovery: assign some vigilantes (WEAKEST first)
  * - territory: strongest slice -> Territory Warfare (aggressive ramp)
  * - earners: remaining -> money, and weakest subset -> respect (auto-tiered + wanted-capped)
+ *
+ * DROP-IN FIX:
+ *  - Previously, territoryKeepMax capped TW count ALWAYS when territoryFrac>0, which forced 2-4 members on TW.
+ *  - Now, territoryKeepMax only caps during taper phase (territory >= cfg.territoryTaperAt),
+ *    so early/midgame TW scales by territoryFrac as intended.
  */
 function assignCombatTasksAndTiers(ns, names, cfg, control) {
   const members = names.map((name) => {
@@ -533,10 +542,18 @@ function assignCombatTasksAndTiers(ns, names, cfg, control) {
   // Territory assignment: strongest slice
   let territoryCount = Math.max(0, Math.floor(afterVigi.length * (control.territoryFrac ?? 0)));
 
-  // Keep a small TW squad while we're still fighting for the last few %
+  // Always keep at least a small TW presence while we're fighting
   if (!control.recovery && (control.territoryFrac ?? 0) > 0) {
     territoryCount = Math.max(territoryCount, cfg.territoryKeepMin);
-    territoryCount = Math.min(territoryCount, cfg.territoryKeepMax ?? territoryCount);
+
+    // ONLY cap TW count during taper phase (near endgame),
+    // otherwise let fraction-based scaling do its job.
+    const territoryNow = Number(control.territory ?? NaN);
+    const isTapering = Number.isFinite(territoryNow) && territoryNow >= cfg.territoryTaperAt;
+
+    if (isTapering && cfg.territoryKeepMax != null) {
+      territoryCount = Math.min(territoryCount, cfg.territoryKeepMax);
+    }
   }
 
   // Also don't exceed available
@@ -813,8 +830,8 @@ function buyEquipmentForGangRoundRobin(ns, decision, cfg, state, catchupMode) {
   if (cfg.equipDebug && catchupMode && buys === 0 && debugNext) {
     ns.print(
       `[equip-debug] cash=$${Math.round(cash).toLocaleString()} ` +
-        `budget=$${Math.round(budget).toLocaleString()} ` +
-        `next=${debugNext.name} cost=$${Math.round(debugNext.cost).toLocaleString()}`
+      `budget=$${Math.round(budget).toLocaleString()} ` +
+      `next=${debugNext.name} cost=$${Math.round(debugNext.cost).toLocaleString()}`
     );
   }
 

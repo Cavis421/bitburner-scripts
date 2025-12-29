@@ -1,6 +1,6 @@
 ﻿# Bitburner Master Codebase v3
 
-> Auto-generated on 2025-12-28 20:56:10.
+> Auto-generated on 2025-12-29 11:52:30.
 
 > Root: C:\Users\campi\projects\bitburner-scripts2\bb
 
@@ -19,6 +19,7 @@
 - bin/controller.js
 - bin/darkweb-auto-buyer.js
 - bin/gang-manager.js
+- bin/intelligence-trainer.js
 - bin/legacy-real/gang/gang-review.js
 - bin/legacy-real/hacknet/hacknet-manager.js
 - bin/legacy-real/hacknet/hacknet-status.js
@@ -51,6 +52,7 @@
 - bin/tools/xp-target-compare.js
 - bin/tools/xp-to-next-level.js
 - bin/ui/asset-ui.js
+- bin/ui/controller-hud.js
 - bin/ui/gang-ui.js
 - bin/ui/hacknet-ui.js
 - bin/ui/karma-watch.js
@@ -1596,9 +1598,11 @@ const FLAGS = [
   // Must-have scripts (your list)
   ["batcher", "bin/timed-net-batcher2.js"],
   ["botnet", "bin/botnet-hgw-sync.js"],
-  ["pserv",  "bin/pserv-manager.js"],
+  ["pserv", "bin/pserv-manager.js"],
   ["trader", "bin/basic-trader.js"],
   ["gangManager", "bin/gang-manager.js"],
+  ["intTrainer", "bin/intelligence-trainer.js"],
+
 
   // Helper scripts you already have
   ["darkwebBuyer", "bin/darkweb-auto-buyer.js"],
@@ -1666,7 +1670,7 @@ export async function main(ns) {
     pserv: String(flags.pserv),
     trader: String(flags.trader),
     gangManager: String(flags.gangManager),
-
+    intTrainer: String(flags.intTrainer),
     darkwebBuyer: String(flags.darkwebBuyer),
 
     // bbOS service enablement
@@ -1879,6 +1883,7 @@ function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
     pserv: !!effective.pserv,
     trader: !!effective.trader,
     gangManager: !!effective.gangManager,
+    intTrainer: !!effective.intTrainer,
     darkwebBuyer: !!effective.darkwebBuyer,
 
     backdoorJob: !!effective.backdoorJob,
@@ -1893,6 +1898,7 @@ function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
     `pserv=${cfg.servicesEnabled.pserv ? "1" : "0"}`,
     `trader=${cfg.servicesEnabled.trader ? "1" : "0"}`,
     `gangManager=${cfg.servicesEnabled.gangManager ? "1" : "0"}`,
+    `intTrainer=${cfg.servicesEnabled.intTrainer ? "1" : "0"}`,
     `darkwebBuyer=${cfg.servicesEnabled.darkwebBuyer ? "1" : "0"}`,
     `backdoorJob=${cfg.servicesEnabled.backdoorJob ? "1" : "0"}`,
     `contractsJob=${cfg.servicesEnabled.contractsJob ? "1" : "0"}`,
@@ -1907,6 +1913,7 @@ function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
       `pserv=${cfg.servicesEnabled.pserv ? "ON" : "OFF"} ` +
       `trader=${cfg.servicesEnabled.trader ? "ON" : "OFF"} ` +
       `gangManager=${cfg.servicesEnabled.gangManager ? "ON" : "OFF"} ` +
+      `intTrainer=${cfg.servicesEnabled.intTrainer ? "ON" : "OFF"} ` +
       `darkwebBuyer=${cfg.servicesEnabled.darkwebBuyer ? "ON" : "OFF"} ` +
       `backdoorJob=${cfg.servicesEnabled.backdoorJob ? "ON" : "OFF"} ` +
       `contractsJob=${cfg.servicesEnabled.contractsJob ? "ON" : "OFF"}`;
@@ -2071,6 +2078,7 @@ function printHelp(ns) {
   ns.tprint("  --jobIntervalMs <ms>      Interval for scheduled jobs (default 600000)");
   ns.tprint("  --backdoorJob <path>      Backdoor job script (default bin/backdoor-oneshot.js)");
   ns.tprint("  --contractsJob <path>     Contracts job script (default bin/contracts-find-and-solve.js)");
+  ns.tprint("  --intTrainer <path>      Intelligence trainer daemon (default bin/intelligence-trainer.js)");
   ns.tprint("");
   ns.tprint("bbOS Services");
   ns.tprint("  --services true|false         Enable service config gating (default true)");
@@ -2472,12 +2480,12 @@ export async function main(ns) {
         inEndgame || recovery
           ? 0
           : ramp(
-              clash.median,
-              cfg.engageMedianMin,
-              cfg.territoryFracRampAt,
-              cfg.territoryMinFrac,
-              cfg.territoryMaxFrac
-            );
+            clash.median,
+            cfg.engageMedianMin,
+            cfg.territoryFracRampAt,
+            cfg.territoryMinFrac,
+            cfg.territoryMaxFrac
+          );
 
       // If we're near-capped on territory, taper TW fraction down toward territoryTaperTo
       if (!inEndgame && !recovery && g.territory >= cfg.territoryTaperAt) {
@@ -2487,6 +2495,7 @@ export async function main(ns) {
       }
 
       // --- PRELIM decision (used to evaluate gear + next-cost) ---
+      // DROP-IN FIX: pass current territory so TW cap only applies during tapering
       const prelimDecision = assignCombatTasksAndTiers(ns, names, cfg, {
         recovery,
         vigiFrac,
@@ -2494,6 +2503,7 @@ export async function main(ns) {
         territoryFrac: territoryFracBase,
         minTrain: dyn.minTrain,
         wantedPenalty: g.wantedPenalty,
+        territory: g.territory, // <-- NEW
       });
 
       // --- Equipment catch-up mode ---
@@ -2523,6 +2533,7 @@ export async function main(ns) {
       const finalTerritoryFrac = cashFarm ? cfg.cashFarmTerritoryFrac : territoryFracBase;
 
       // --- FINAL decision (after cashFarm overrides) ---
+      // DROP-IN FIX: pass current territory so TW cap only applies during tapering
       const decision = assignCombatTasksAndTiers(ns, names, cfg, {
         recovery,
         vigiFrac,
@@ -2530,6 +2541,7 @@ export async function main(ns) {
         territoryFrac: finalTerritoryFrac,
         minTrain: dyn.minTrain,
         wantedPenalty: g.wantedPenalty,
+        territory: g.territory, // <-- NEW
       });
 
       // Engage/disengage logic (more aggressive than "worst chance")
@@ -2551,7 +2563,7 @@ export async function main(ns) {
           ns,
           cfg,
           `[gang] warfare ${engaged ? "ENABLED" : "disabled"} ` +
-            `(median=${(clash.median * 100).toFixed(1)}%, gte${Math.round(cfg.engageNChanceMin * 100)}=${clash.countGteNChanceMin})`
+          `(median=${(clash.median * 100).toFixed(1)}%, gte${Math.round(cfg.engageNChanceMin * 100)}=${clash.countGteNChanceMin})`
         );
       }
 
@@ -2708,6 +2720,11 @@ function pickRespectTaskCapped(cfg, minCombat, wantedPenalty) {
  * - if recovery: assign some vigilantes (WEAKEST first)
  * - territory: strongest slice -> Territory Warfare (aggressive ramp)
  * - earners: remaining -> money, and weakest subset -> respect (auto-tiered + wanted-capped)
+ *
+ * DROP-IN FIX:
+ *  - Previously, territoryKeepMax capped TW count ALWAYS when territoryFrac>0, which forced 2-4 members on TW.
+ *  - Now, territoryKeepMax only caps during taper phase (territory >= cfg.territoryTaperAt),
+ *    so early/midgame TW scales by territoryFrac as intended.
  */
 function assignCombatTasksAndTiers(ns, names, cfg, control) {
   const members = names.map((name) => {
@@ -2770,10 +2787,18 @@ function assignCombatTasksAndTiers(ns, names, cfg, control) {
   // Territory assignment: strongest slice
   let territoryCount = Math.max(0, Math.floor(afterVigi.length * (control.territoryFrac ?? 0)));
 
-  // Keep a small TW squad while we're still fighting for the last few %
+  // Always keep at least a small TW presence while we're fighting
   if (!control.recovery && (control.territoryFrac ?? 0) > 0) {
     territoryCount = Math.max(territoryCount, cfg.territoryKeepMin);
-    territoryCount = Math.min(territoryCount, cfg.territoryKeepMax ?? territoryCount);
+
+    // ONLY cap TW count during taper phase (near endgame),
+    // otherwise let fraction-based scaling do its job.
+    const territoryNow = Number(control.territory ?? NaN);
+    const isTapering = Number.isFinite(territoryNow) && territoryNow >= cfg.territoryTaperAt;
+
+    if (isTapering && cfg.territoryKeepMax != null) {
+      territoryCount = Math.min(territoryCount, cfg.territoryKeepMax);
+    }
   }
 
   // Also don't exceed available
@@ -3050,8 +3075,8 @@ function buyEquipmentForGangRoundRobin(ns, decision, cfg, state, catchupMode) {
   if (cfg.equipDebug && catchupMode && buys === 0 && debugNext) {
     ns.print(
       `[equip-debug] cash=$${Math.round(cash).toLocaleString()} ` +
-        `budget=$${Math.round(budget).toLocaleString()} ` +
-        `next=${debugNext.name} cost=$${Math.round(debugNext.cost).toLocaleString()}`
+      `budget=$${Math.round(budget).toLocaleString()} ` +
+      `next=${debugNext.name} cost=$${Math.round(debugNext.cost).toLocaleString()}`
     );
   }
 
@@ -3165,6 +3190,191 @@ Notes:
   - Catch-up and cash-farming are automatic; watch mode tags in the summary: "+CASH".
   - Use --equipDebug to print why purchases are blocked (budget vs next item cost).
 `);
+}
+```
+/* == END FILE == */
+
+/* == FILE: bin/intelligence-trainer.js == */
+```js
+/**
+ * bin/intelligence-trainer.js
+ *
+ * Description
+ *  Passive Intelligence XP trainer meant to run as a controller-managed daemon.
+ *  Uses a time-slice approach so you still gain INT even if your controller keeps you busy.
+ *
+ *  Behavior (during INT slice window):
+ *   1) If any darkweb programs are missing: createProgram() (INT XP + utility)
+ *   2) Otherwise: study "Computer Science" at university
+ *  Outside the slice: does nothing (lets controller run your normal work)
+ *
+ * Notes
+ *  - Requires Singularity (Source-File 4).
+ *  - Uses ns.singularity.stopAction() at end of slice; controller will re-assert its work next tick.
+ *  - By default, does NOT interrupt faction work (set --respectFaction false to allow).
+ *
+ * Syntax
+ *  run bin/intelligence-trainer.js [--help]
+ *  run bin/intelligence-trainer.js --periodMin 60 --sliceMin 10
+ *  run bin/intelligence-trainer.js --respectFaction false
+ *  run bin/intelligence-trainer.js --city Sector-12 --university "Rothman University"
+ */
+
+/** @param {NS} ns */
+export async function main(ns) {
+    const flags = ns.flags([
+        ["help", false],
+
+        // Time slicing
+        ["periodMin", 60],        // repeat interval
+        ["sliceMin", 10],         // how long to do INT work each period
+        ["offsetMin", 0],         // shift schedule (useful if you want it aligned differently)
+        ["respectFaction", true], // if true: don't interrupt FACTION work
+
+        // Study settings
+        ["city", "Sector-12"],
+        ["university", "Rothman University"],
+
+        // Loop cadence
+        ["pollMs", 5_000],
+    ]);
+
+    if (flags.help) {
+        printHelp(ns);
+        return;
+    }
+
+    ns.disableLog("ALL");
+
+    if (!ns.singularity) {
+        ns.tprint("ERROR: Requires Singularity (SF4).");
+        return;
+    }
+
+    const periodMs = Math.max(60_000, Number(flags.periodMin) * 60_000);
+    const sliceMs = Math.max(5_000, Number(flags.sliceMin) * 60_000);
+    const offsetMs = Math.max(0, Number(flags.offsetMin) * 60_000);
+    const pollMs = Math.max(1_000, Number(flags.pollMs) || 5_000);
+
+    const respectFaction = !!flags.respectFaction;
+    const city = String(flags.city || "Sector-12");
+    const university = String(flags.university || "Rothman University");
+
+    // Track whether *we* started an INT slice so we can stopAction() cleanly at end.
+    let sliceActive = false;
+    let sliceEndAt = 0;
+
+    while (true) {
+        const now = Date.now();
+
+        // Compute whether we should be in the slice window.
+        // Window is [windowStart, windowStart + sliceMs) within each period.
+        const phase = mod(now - offsetMs, periodMs);
+        const shouldSlice = phase < sliceMs;
+
+        // If slice time ended and we were active, stop and let controller resume normal work.
+        if (!shouldSlice && sliceActive) {
+            try {
+                ns.singularity.stopAction();
+            } catch { /* ignore */ }
+            sliceActive = false;
+            sliceEndAt = 0;
+            await ns.sleep(pollMs);
+            continue;
+        }
+
+        // If not in slice window, do nothing.
+        if (!shouldSlice) {
+            await ns.sleep(pollMs);
+            continue;
+        }
+
+        // We are in slice window.
+        // If respectFaction=true and current work is FACTION, skip the slice (no interruption).
+        const work = safe(() => ns.singularity.getCurrentWork(), null);
+        if (respectFaction && work && String(work.type || "").toUpperCase() === "FACTION") {
+            await ns.sleep(pollMs);
+            continue;
+        }
+
+        // Mark slice active (so we can stopAction() when leaving the window).
+        if (!sliceActive) {
+            sliceActive = true;
+            // for debugging / optional logging
+            sliceEndAt = now + (sliceMs - phase);
+            ns.print(`[intTrainer] INT slice started; ends in ${Math.ceil((sliceEndAt - now) / 1000)}s`);
+        }
+
+        // During the slice: prefer creating missing programs, else study CS.
+        if (tryStartCreateMissingProgram(ns)) {
+            await ns.sleep(pollMs);
+            continue;
+        }
+
+        // Fall back to studying CS
+        try { ns.singularity.travelToCity(city); } catch { /* ignore */ }
+        const ok = safe(() => ns.singularity.universityCourse(university, "Computer Science", false), false);
+        if (!ok) ns.print(`[intTrainer] WARN: failed to start universityCourse at "${university}" in "${city}"`);
+
+        await ns.sleep(pollMs);
+    }
+}
+
+function tryStartCreateMissingProgram(ns) {
+    // If we canâ€™t access darkweb list yet, just return false and study instead.
+    const progs = safe(() => ns.singularity.getDarkwebPrograms(), null);
+    if (!Array.isArray(progs) || progs.length === 0) return false;
+
+    for (const p of progs) {
+        if (!ns.fileExists(p, "home")) {
+            const ok = safe(() => ns.singularity.createProgram(p, false), false);
+            if (ok) {
+                ns.print(`[intTrainer] creating program: ${p}`);
+                return true;
+            }
+            // If createProgram fails (requirements not met), move on to studying.
+            return false;
+        }
+    }
+    return false;
+}
+
+function safe(fn, fallback) {
+    try { return fn(); } catch { return fallback; }
+}
+
+// Proper modulo for negative values too
+function mod(a, b) {
+    const r = a % b;
+    return r < 0 ? r + b : r;
+}
+
+function printHelp(ns) {
+    ns.tprint("bin/intelligence-trainer.js");
+    ns.tprint("");
+    ns.tprint("Description");
+    ns.tprint("  Time-sliced Intelligence XP trainer for controller-managed use.");
+    ns.tprint("  During slice window: create missing programs, else study Computer Science.");
+    ns.tprint("");
+    ns.tprint("Notes");
+    ns.tprint("  - Requires Singularity (SF4).");
+    ns.tprint("  - Calls stopAction() when leaving slice; controller will resume normal work next tick.");
+    ns.tprint("  - By default does not interrupt FACTION work (use --respectFaction false to allow).");
+    ns.tprint("");
+    ns.tprint("Syntax");
+    ns.tprint("  run bin/intelligence-trainer.js [--help]");
+    ns.tprint("  run bin/intelligence-trainer.js --periodMin 60 --sliceMin 10");
+    ns.tprint("  run bin/intelligence-trainer.js --respectFaction false");
+    ns.tprint("  run bin/intelligence-trainer.js --city Sector-12 --university \"Rothman University\"");
+    ns.tprint("");
+    ns.tprint("Flags");
+    ns.tprint("  --periodMin <n>         Repeat interval in minutes (default 60)");
+    ns.tprint("  --sliceMin <n>          INT slice duration per period (default 10)");
+    ns.tprint("  --offsetMin <n>         Shift schedule by minutes (default 0)");
+    ns.tprint("  --respectFaction true|false  Don't interrupt faction work (default true)");
+    ns.tprint("  --city <name>           City for university (default Sector-12)");
+    ns.tprint("  --university <name>     University name (default Rothman University)");
+    ns.tprint("  --pollMs <ms>           Loop polling interval (default 5000)");
 }
 ```
 /* == END FILE == */
@@ -6037,7 +6247,7 @@ function printHelp(ns) {
  *
  * **/
 //@param {NS} ns
-
+ 
 export async function main(ns) {
     ns.disableLog("ALL");
 
@@ -6440,7 +6650,7 @@ function countPortCrackers(ns) {
  * network.js
  *
  * Functions for scanning and mapping the server network.
- *
+ * 
 */
 
 /**
@@ -6450,7 +6660,7 @@ function countPortCrackers(ns) {
  * @param {NS} ns
  * @param {Object} options
  * @param {string} [options.start='home']
- * @param {(host: string, ctx: {depth: number, parent: string | null})
+ * @param {(host: string, ctx: {depth: number, parent: string | null}) 
  *          => (void|boolean|Promise<void|boolean>)} options.visit
  *        If visit() returns true, traversal stops early.
  */
@@ -6593,7 +6803,7 @@ export async function findPath(ns, target, start = 'home') {
     return path.reverse();
 }
 
-/**
+/** 
  * Get all rooted servers.
  *
  * @param {NS} ns
@@ -7553,7 +7763,7 @@ export async function main(ns) {
 
         if (sec > minSec + 0.5) {
             await ns.weaken(target);
-        }
+        } 
         else if (money < maxMoney * 0.99) {
             await ns.grow(target);
         }
@@ -8566,6 +8776,691 @@ function getAsk(ns, sym) {
 function fmtMoney(ns, v) {
   if (typeof ns.formatMoney === "function") return ns.formatMoney(v);
   return `$${ns.formatNumber(v)}`;
+}
+```
+/* == END FILE == */
+
+/* == FILE: bin/ui/controller-hud.js == */
+```js
+/** @param {NS} ns */
+/*
+ * /bin/ui/controller-hud.js
+ *
+ * Description
+ *  Unified controller HUD (Tail dashboard) rendered as ONE continuous report:
+ *   1) UI ops dashboard (report header: player/money/RAM + trends)
+ *   2) timed-net-batcher-ui summary (active targets + target status + classification)
+ *   3) WSE asset-dashboard summary
+ *   4) gang summary (or Karma-Watch fallback)
+ *   5) hacknet summary
+ *   6) bbOS services summary (ASCII-only; no mojibake; oneshots show IDLE)
+ *
+ * Notes
+ *  - Read-only: does not start/stop services.
+ *  - Trend fix: primary "Income" uses ns.getTotalScriptIncome() (not distorted by spending).
+ *    Optional CashÎ” and NetWorthÎ” are rolling-window slopes to diagnose spending / net worth changes.
+ *
+ * Syntax
+ *  run /bin/ui/controller-hud.js
+ *  run /bin/ui/controller-hud.js --interval 1000
+ *  run /bin/ui/controller-hud.js --help
+ */
+
+import { getServiceRegistry } from "/lib/os/service-registry.js";
+import {
+    DEFAULT_SERVICE_CONFIG_PATH,
+    normalizeDataPath,
+    loadServiceConfig,
+    getEffectiveEnabledMap,
+} from "/lib/os/service-config.js";
+
+const FLAGS = [
+    ["help", false],
+
+    // UI
+    ["interval", 1500],
+    ["popout", true],
+    ["once", false],
+
+    // Batcher section
+    ["batchTarget", ""],        // optional: pin a target (otherwise: most common active target)
+    ["maxActiveTargets", 3],    // keep it readable
+    ["workerScripts", "workers/hwgw/batch-hack.js,workers/hwgw/batch-grow.js,workers/hwgw/batch-weaken.js"],
+
+    // Service status scope
+    ["host", "home"],
+    ["allHosts", false],
+
+    // Trend sampling
+    ["trendWindowSec", 120],
+    ["maxSamples", 240],
+    ["showCashDelta", true],      // show cash slope (useful but not "income")
+    ["showNetWorthDelta", true],  // uses WSE net liquidation if available
+
+    // Services rendering
+    ["oneshotKeys", "backdoorJob,contractsJob"], // treat as oneshot jobs -> IDLE when not running
+];
+
+export async function main(ns) {
+    const flags = ns.flags(FLAGS);
+    if (flags.help) {
+        printHelp(ns);
+        return;
+    }
+
+    ns.disableLog("ALL");
+    ns.clearLog();
+
+    if (flags.popout) {
+        if (ns.ui?.openTail) ns.ui.openTail();
+        else ns.tail();
+    }
+
+    const interval = Math.max(250, Number(flags.interval) || 1500);
+
+    const cashTrend = makeTrend(ns, flags, {
+        file: "data/hud-cash-trend.txt",
+        sampleFn: () => ns.getServerMoneyAvailable("home"),
+    });
+
+    const netWorthTrend = makeTrend(ns, flags, {
+        file: "data/hud-networth-trend.txt",
+        sampleFn: () => computeNetLiquidation(ns), // may return null if no stock API
+        allowNull: true,
+    });
+
+    while (true) {
+        ns.clearLog();
+
+        cashTrend.sample();
+        netWorthTrend.sample();
+
+        renderReport(ns, flags, cashTrend, netWorthTrend);
+
+        if (flags.once) return;
+        await ns.sleep(interval);
+    }
+}
+
+function renderReport(ns, flags, cashTrend, netWorthTrend) {
+    const now = new Date();
+    const player = ns.getPlayer();
+
+    // -------------------------------
+    // REPORT HEADER (Ops dashboard)
+    // -------------------------------
+    const money = player.money ?? ns.getServerMoneyAvailable("home");
+    const hackLvl = player.skills?.hacking ?? player.hacking ?? ns.getHackingLevel();
+
+    const homeMax = ns.getServerMaxRam("home");
+    const homeUsed = ns.getServerUsedRam("home");
+    const homeFree = Math.max(0, homeMax - homeUsed);
+
+    // Trend fix: use script income rate (not distorted by spending)
+    const [scriptMoneyPerSec] = safeArr(() => ns.getTotalScriptIncome(), [NaN]);
+
+    const xpRate = readXpThroughput(ns, "data/xp-throughput.txt");
+
+    const cashDeltaPerSec = cashTrend.ratePerSec();
+    const netWorthDeltaPerSec = netWorthTrend.ratePerSec(); // may be NaN if not available
+
+    ns.print("=================================================================");
+    ns.print(`bbOS Controller Report | ${now.toLocaleTimeString()}`);
+    ns.print("-----------------------------------------------------------------");
+    ns.print(`Player: ${player.name ?? "Player"}   |   Hacking: ${hackLvl}`);
+    ns.print(`Money:  ${fmtMoney(ns, money)}`);
+    ns.print(`Home RAM: ${fmtRam(homeUsed)} / ${fmtRam(homeMax)} GB (free ${fmtRam(homeFree)} GB)`);
+
+    const incomeStr = Number.isFinite(scriptMoneyPerSec) ? `${fmtMoney(ns, scriptMoneyPerSec)}/s` : "n/a";
+
+    let trendLine = `Income: ${padLeftShort(incomeStr, 14)}`;
+
+    if (flags.showNetWorthDelta) {
+        const nwStr = Number.isFinite(netWorthDeltaPerSec) ? `${fmtMoney(ns, netWorthDeltaPerSec)}/s` : "n/a";
+        trendLine += ` | NetWorthÎ”: ${padLeftShort(nwStr, 14)}`;
+    }
+    if (flags.showCashDelta) {
+        const cashStr = Number.isFinite(cashDeltaPerSec) ? `${fmtMoney(ns, cashDeltaPerSec)}/s` : "n/a";
+        trendLine += ` | CashÎ”: ${padLeftShort(cashStr, 14)}`;
+    }
+    if (xpRate) {
+        trendLine += ` | XP: ${xpRate.xpPerSec.toFixed(2)} XP/s`;
+    }
+    ns.print(trendLine);
+
+    ns.print("=================================================================");
+    ns.print("");
+
+    // Order you requested, but rendered as one â€œfluid reportâ€
+    renderBatcherSection(ns, flags);
+    ns.print("");
+    renderWseAssetsSection(ns);
+    ns.print("");
+    renderGangOrKarmaSection(ns);
+    ns.print("");
+    renderHacknetSection(ns);
+    ns.print("");
+    renderServicesSection(ns, flags);
+    ns.print("");
+}
+
+// -----------------------------------------------------------------------------
+// 2) timed-net-batcher-ui summary (readable / compact)
+// -----------------------------------------------------------------------------
+function renderBatcherSection(ns, flags) {
+    const workerScripts = String(flags.workerScripts || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+    const hackScript = workerScripts[0] || "workers/hwgw/batch-hack.js";
+    const growScript = workerScripts[1] || "workers/hwgw/batch-grow.js";
+    const weakScript = workerScripts[2] || "workers/hwgw/batch-weaken.js";
+
+    // thresholds (match your earlier UI behavior)
+    const MONEY_THRESHOLD = 0.90;
+    const SEC_TOLERANCE = 0.90;
+    const LOWRAM_MONEY_THRESHOLD = 0.90;
+    const LOWRAM_SEC_TOLERANCE = 1.50;
+    const PSERV_MIN_TOTAL_RAM = 64;
+
+    const snap = getTimedBatcherSnapshot(ns, {
+        pinnedTarget: String(flags.batchTarget || "").trim(),
+        hackScript,
+        growScript,
+        weakScript,
+        MONEY_THRESHOLD,
+        SEC_TOLERANCE,
+        LOWRAM_MONEY_THRESHOLD,
+        LOWRAM_SEC_TOLERANCE,
+        PSERV_MIN_TOTAL_RAM,
+    });
+
+    ns.print("== Targets ==");
+    if (!snap.activeTargets.length) {
+        ns.print("  Active: (no batch workers detected)");
+        ns.print("  Tip: start batcher, or pass --batchTarget <host>");
+        return;
+    }
+
+    const maxActive = Math.max(1, Number(flags.maxActiveTargets) || 3);
+    const activeLine = snap.activeTargets
+        .slice(0, maxActive)
+        .map((x) => `${x.target}:${x.threads}`)
+        .join(" | ");
+
+    ns.print(`  Active: ${activeLine}`);
+
+    if (!snap.target) {
+        ns.print("  Target: (unknown)");
+        return;
+    }
+
+    ns.print(`  Target: ${snap.target}`);
+
+    if (snap.targetStats) {
+        const ts = snap.targetStats;
+        ns.print(
+            `  Money:  ${fmtMoney(ns, ts.money)} / ${fmtMoney(ns, ts.max)} (${(ts.moneyRatio * 100).toFixed(2)}%)`
+        );
+        ns.print(
+            `  Sec:    ${ts.sec.toFixed(2)} (min ${ts.minSec.toFixed(2)})  Î”=${ts.secDelta.toFixed(2)}`
+        );
+    }
+
+    if (snap.prepState) {
+        const ps = snap.prepState;
+        ns.print(
+            `  Mode:   ${ps.prepping ? "PREP" : "MONEY"}  (money>=${(ps.moneyThresh * 100).toFixed(0)}%  secÎ”<=${ps.secThresh.toFixed(2)})`
+        );
+    }
+}
+
+function getTimedBatcherSnapshot(ns, cfg) {
+    const purchased = ns.getPurchasedServers();
+    const hosts = ["home", ...purchased];
+
+    let totalPservRam = 0;
+    for (const h of purchased) totalPservRam += ns.getServerMaxRam(h);
+
+    const desiredMode = totalPservRam >= cfg.PSERV_MIN_TOTAL_RAM ? "HYBRID" : "HOME";
+    const lowramLikely = desiredMode === "HOME";
+
+    const active = new Map(); // target -> threads
+
+    for (const host of hosts) {
+        const procs = safeArr(() => ns.ps(host), []);
+        for (const p of procs) {
+            if (p.filename !== cfg.hackScript && p.filename !== cfg.growScript && p.filename !== cfg.weakScript) continue;
+            const target = String(p.args?.[0] ?? "").trim();
+            if (!target) continue;
+            active.set(target, (active.get(target) || 0) + (p.threads || 0));
+        }
+    }
+
+    const activeTargets = Array.from(active.entries())
+        .map(([target, threads]) => ({ target, threads }))
+        .sort((a, b) => b.threads - a.threads || a.target.localeCompare(b.target));
+
+    const pinned = String(cfg.pinnedTarget || "");
+    const target = pinned || (activeTargets[0]?.target ?? "");
+
+    const targetStats = target ? getTargetStats(ns, target) : null;
+
+    const moneyThresh = lowramLikely ? cfg.LOWRAM_MONEY_THRESHOLD : cfg.MONEY_THRESHOLD;
+    const secThresh = lowramLikely ? cfg.LOWRAM_SEC_TOLERANCE : cfg.SEC_TOLERANCE;
+
+    let prepState = null;
+    if (targetStats) {
+        const moneyOk = targetStats.moneyRatio >= moneyThresh;
+        const secOk = targetStats.secDelta <= secThresh;
+        prepState = {
+            lowramLikely,
+            moneyThresh,
+            secThresh,
+            moneyOk,
+            secOk,
+            prepping: !(moneyOk && secOk),
+        };
+    }
+
+    return { activeTargets, target, targetStats, prepState };
+}
+
+function getTargetStats(ns, target) {
+    const money = ns.getServerMoneyAvailable(target);
+    const max = ns.getServerMaxMoney(target);
+    const sec = ns.getServerSecurityLevel(target);
+    const minSec = ns.getServerMinSecurityLevel(target);
+
+    const moneyRatio = max > 0 ? money / max : 0;
+    const secDelta = sec - minSec;
+
+    return { money, max, moneyRatio, sec, minSec, secDelta };
+}
+
+// -----------------------------------------------------------------------------
+// 3) WSE assets (compact)
+// -----------------------------------------------------------------------------
+function renderWseAssetsSection(ns) {
+    ns.print("== WSE Assets ==");
+    if (!ns.stock || typeof ns.stock.getSymbols !== "function") {
+        ns.print("  Status: (Stock API not available)");
+        return;
+    }
+
+    const cash = ns.getServerMoneyAvailable("home");
+    const symbols = ns.stock.getSymbols();
+
+    const bidFn = ns.stock.getBidPrice ?? ns.stock.getStockBidPrice;
+    const askFn = ns.stock.getAskPrice ?? ns.stock.getStockAskPrice;
+
+    let longMarket = 0;
+    let longLiquidation = 0;
+    let shortCloseCost = 0;
+
+    for (const sym of symbols) {
+        const price = ns.stock.getPrice(sym);
+        const bid = typeof bidFn === "function" ? bidFn(sym) : null;
+        const ask = typeof askFn === "function" ? askFn(sym) : null;
+
+        const [longShares, , shortShares] = ns.stock.getPosition(sym);
+
+        if (longShares > 0) {
+            longMarket += longShares * price;
+            longLiquidation += longShares * (bid ?? price);
+        }
+        if (shortShares > 0) {
+            shortCloseCost += shortShares * (ask ?? price);
+        }
+    }
+
+    const netLiquidation = cash + longLiquidation - shortCloseCost;
+
+    ns.print(`  Cash:        ${fmtMoney(ns, cash)}`);
+    ns.print(`  Long (mkt):   ${fmtMoney(ns, longMarket)}`);
+    ns.print(`  Long (liq):   ${fmtMoney(ns, longLiquidation)}`);
+    ns.print(`  Short close: -${fmtMoney(ns, shortCloseCost)}`);
+    ns.print(`  Net liq:      ${fmtMoney(ns, netLiquidation)}`);
+}
+
+// -----------------------------------------------------------------------------
+// 4) Gang (or Karma) - compact
+// -----------------------------------------------------------------------------
+function renderGangOrKarmaSection(ns) {
+    ns.print("== Gang ==");
+    const hasGangApi = !!ns.gang;
+    const inGang = hasGangApi && safeBool(() => ns.gang.inGang(), false);
+
+    if (!hasGangApi || !inGang) {
+        const karma = safeNum(() => ns.heart.break(), NaN);
+        ns.print(`  Status: (no gang)`);
+        ns.print(`  Karma:  ${Number.isFinite(karma) ? karma.toFixed(2) : "n/a"}`);
+        return;
+    }
+
+    const g = ns.gang.getGangInformation();
+    const type = g.isHacking ? "HACKING" : "COMBAT";
+
+    const members = safeArr(() => ns.gang.getMemberNames(), []);
+    const tasks = new Map();
+    for (const m of members) {
+        const mi = ns.gang.getMemberInformation(m);
+        const t = String(mi.task || "Unassigned");
+        tasks.set(t, (tasks.get(t) || 0) + 1);
+    }
+    const topTasks = Array.from(tasks.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 2)
+        .map(([t, c]) => `${t}:${c}`)
+        .join("  ");
+
+    ns.print(`  Type:      ${type} | Faction: ${g.faction}`);
+    ns.print(
+        `  Territory: ${(g.territory * 100).toFixed(1)}% | Power: ${ns.formatNumber(g.power, 2)} | Warfare: ${g.territoryWarfareEngaged ? "ON" : "OFF"}`
+    );
+    ns.print(
+        `  Wanted:    ${(g.wantedPenalty * 100).toFixed(1)}% pen | ${ns.formatNumber(g.wantedLevel, 2)} lvl | ${ns.formatNumber(g.respect, 2)} resp`
+    );
+    ns.print(`  Tasks:     ${topTasks || "n/a"}`);
+}
+
+// -----------------------------------------------------------------------------
+// 5) Hacknet - compact
+// -----------------------------------------------------------------------------
+function renderHacknetSection(ns) {
+    ns.print("== Hacknet ==");
+    if (!ns.hacknet) {
+        ns.print("  Status: (Hacknet API not available)");
+        return;
+    }
+
+    const nodes = safeNum(() => ns.hacknet.numNodes(), 0);
+
+    let total = 0;
+    let min = Infinity;
+    let max = 0;
+
+    for (let i = 0; i < nodes; i++) {
+        const st = ns.hacknet.getNodeStats(i);
+        const p = Number(st.production || 0);
+        total += p;
+        min = Math.min(min, p);
+        max = Math.max(max, p);
+    }
+    if (!Number.isFinite(min)) min = 0;
+
+    ns.print(`  Nodes: ${nodes}`);
+    ns.print(`  Prod:  ${fmtMoney(ns, total)}/s  (min ${fmtMoney(ns, min)}/s  max ${fmtMoney(ns, max)}/s)`);
+}
+
+// -----------------------------------------------------------------------------
+// 6) bbOS Services (ASCII-only; oneshots show IDLE)
+// -----------------------------------------------------------------------------
+function renderServicesSection(ns, flags) {
+    ns.print("== bbOS Services ==");
+
+    const oneshotKeys = new Set(
+        String(flags.oneshotKeys || "")
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+    );
+
+    const registry = safeArr(() => getServiceRegistry(), []);
+    const conf = safeObj(() => loadServiceConfig(ns, normalizeDataPath(DEFAULT_SERVICE_CONFIG_PATH)), {});
+    const effective = safeObj(() => getEffectiveEnabledMap(registry, conf), {});
+    const running = getRunningScriptSet(ns, flags);
+
+    // Compute max key length for alignment
+    let keyPad = 10;
+    for (const svc of registry) {
+        if (!svc.managed) continue;
+        keyPad = Math.max(keyPad, String(svc.key).length);
+    }
+
+    for (const svc of registry) {
+        if (!svc.managed) continue;
+
+        const key = String(svc.key);
+        const script = String(svc.script || "").replace(/^\/+/, "");
+        const enabled = !!effective[key];
+        const isRunning = running.has(script);
+        const isOneshot = oneshotKeys.has(key);
+
+        const tag = !enabled
+            ? "[DIS]"
+            : isRunning
+                ? "[RUN]"
+                : isOneshot
+                    ? "[IDLE]"
+                    : "[DOWN]";
+
+        ns.print(`  ${tag} ${padRight(key, keyPad)}  ${script}`);
+    }
+}
+
+function getRunningScriptSet(ns, flags) {
+    const set = new Set();
+    const host = String(flags.host || "home");
+
+    if (flags.allHosts) {
+        for (const h of discoverHosts(ns)) {
+            for (const p of safeArr(() => ns.ps(h), [])) {
+                set.add(String(p.filename || "").replace(/^\/+/, ""));
+            }
+        }
+        return set;
+    }
+
+    for (const p of safeArr(() => ns.ps(host), [])) {
+        set.add(String(p.filename || "").replace(/^\/+/, ""));
+    }
+    return set;
+}
+
+function discoverHosts(ns) {
+    const out = [];
+    const seen = new Set(["home"]);
+    const q = ["home"];
+    while (q.length) {
+        const cur = q.shift();
+        out.push(cur);
+        for (const n of safeArr(() => ns.scan(cur), [])) {
+            if (!seen.has(n)) {
+                seen.add(n);
+                q.push(n);
+            }
+        }
+    }
+    return out;
+}
+
+// -----------------------------------------------------------------------------
+// Trend sampling (generic) + xp-throughput file read
+// -----------------------------------------------------------------------------
+function makeTrend(ns, flags, cfg) {
+    const windowSec = Math.max(10, Number(flags.trendWindowSec) || 120);
+    const maxSamples = Math.max(10, Number(flags.maxSamples) || 240);
+    const file = String(cfg.file || "data/hud-trend.txt");
+    const allowNull = !!cfg.allowNull;
+    const sampleFn = cfg.sampleFn;
+
+    /** @type {{ts:number, value:number}[]} */
+    let samples = [];
+
+    try {
+        const raw = ns.read(file);
+        if (raw) {
+            const parsed = JSON.parse(String(raw));
+            if (Array.isArray(parsed)) {
+                samples = parsed.filter((x) => x && Number.isFinite(x.ts) && Number.isFinite(x.value));
+            }
+        }
+    } catch { /* ignore */ }
+
+    function sample() {
+        const ts = Date.now();
+        let value;
+        try {
+            value = sampleFn();
+        } catch {
+            value = null;
+        }
+
+        if (value === null || value === undefined) {
+            if (!allowNull) return;
+            // don't add a sample if unavailable (prevents bogus slopes)
+            return;
+        }
+        if (!Number.isFinite(value)) return;
+
+        samples.push({ ts, value });
+
+        const cutoff = ts - windowSec * 1000;
+        while (samples.length && samples[0].ts < cutoff) samples.shift();
+        if (samples.length > maxSamples) samples = samples.slice(samples.length - maxSamples);
+
+        try { ns.write(file, JSON.stringify(samples), "w"); } catch { /* ignore */ }
+    }
+
+    function ratePerSec() {
+        if (samples.length < 2) return NaN;
+        const first = samples[0];
+        const last = samples[samples.length - 1];
+        const dt = (last.ts - first.ts) / 1000;
+        if (dt <= 0) return NaN;
+        return (last.value - first.value) / dt;
+    }
+
+    return { sample, ratePerSec };
+}
+
+function readXpThroughput(ns, file) {
+    try {
+        const raw = ns.read(file);
+        if (!raw) return null;
+        const p = JSON.parse(String(raw));
+        if (!p || !Number.isFinite(p.xpPerSec)) return null;
+
+        const ageSec = (Date.now() - Number(p.ts || 0)) / 1000;
+        if (!Number.isFinite(ageSec) || ageSec > 15 * 60) return null;
+
+        return { xpPerSec: Number(p.xpPerSec), ts: Number(p.ts || 0) };
+    } catch {
+        return null;
+    }
+}
+
+// Compute net liquidation value (cash + long liquidation - short close)
+// Returns null if Stock API is not available.
+function computeNetLiquidation(ns) {
+    if (!ns.stock || typeof ns.stock.getSymbols !== "function") return null;
+
+    const cash = ns.getServerMoneyAvailable("home");
+    const symbols = ns.stock.getSymbols();
+
+    const bidFn = ns.stock.getBidPrice ?? ns.stock.getStockBidPrice;
+    const askFn = ns.stock.getAskPrice ?? ns.stock.getStockAskPrice;
+
+    let longLiquidation = 0;
+    let shortCloseCost = 0;
+
+    for (const sym of symbols) {
+        const price = ns.stock.getPrice(sym);
+        const bid = typeof bidFn === "function" ? bidFn(sym) : null;
+        const ask = typeof askFn === "function" ? askFn(sym) : null;
+
+        const [longShares, , shortShares] = ns.stock.getPosition(sym);
+
+        if (longShares > 0) {
+            longLiquidation += longShares * (bid ?? price);
+        }
+        if (shortShares > 0) {
+            shortCloseCost += shortShares * (ask ?? price);
+        }
+    }
+
+    return cash + longLiquidation - shortCloseCost;
+}
+
+// -----------------------------------------------------------------------------
+// Formatting / utils
+// -----------------------------------------------------------------------------
+function fmtMoney(ns, v) {
+    if (!Number.isFinite(v)) return "n/a";
+    if (typeof ns.formatMoney === "function") return ns.formatMoney(v);
+    return "$" + ns.formatNumber(v, 2);
+}
+
+function fmtRam(gb) {
+    if (!Number.isFinite(gb)) return "n/a";
+    return Number(gb).toFixed(1);
+}
+
+function padRight(s, n) {
+    s = String(s);
+    return s.length >= n ? s : s + " ".repeat(n - s.length);
+}
+
+// Keeps header line from jumping around when values change length
+function padLeftShort(s, n) {
+    s = String(s);
+    return s.length >= n ? s : " ".repeat(n - s.length) + s;
+}
+
+function safeArr(fn, fallback) {
+    try {
+        const v = fn();
+        return Array.isArray(v) ? v : fallback;
+    } catch { return fallback; }
+}
+function safeObj(fn, fallback) {
+    try {
+        const v = fn();
+        return v && typeof v === "object" ? v : fallback;
+    } catch { return fallback; }
+}
+function safeNum(fn, fallback) {
+    try {
+        const v = fn();
+        return Number.isFinite(v) ? v : fallback;
+    } catch { return fallback; }
+}
+function safeBool(fn, fallback) {
+    try {
+        const v = fn();
+        return typeof v === "boolean" ? v : fallback;
+    } catch { return fallback; }
+}
+
+/** @param {NS} ns */
+function printHelp(ns) {
+    ns.tprint("/bin/ui/controller-hud.js");
+    ns.tprint("");
+    ns.tprint("Description");
+    ns.tprint("  Unified controller HUD rendered as one continuous report.");
+    ns.tprint("  Trend fix: Income uses ns.getTotalScriptIncome() (not cash delta).");
+    ns.tprint("");
+    ns.tprint("Syntax");
+    ns.tprint("  run /bin/ui/controller-hud.js");
+    ns.tprint("  run /bin/ui/controller-hud.js --interval 1000");
+    ns.tprint("  run /bin/ui/controller-hud.js --batchTarget phantasy");
+    ns.tprint("  run /bin/ui/controller-hud.js --allHosts true");
+    ns.tprint("  run /bin/ui/controller-hud.js --help");
+    ns.tprint("");
+    ns.tprint("Flags");
+    ns.tprint("  --interval <ms>           Refresh cadence (default 1500)");
+    ns.tprint("  --popout true|false       Open Tail window (default true)");
+    ns.tprint("  --once true|false         Render once and exit (default false)");
+    ns.tprint("  --batchTarget <host>      Pin target for Target Status (default auto)");
+    ns.tprint("  --maxActiveTargets <n>    Show top N active targets (default 3)");
+    ns.tprint("  --host <name>             Process scan host when allHosts=false (default home)");
+    ns.tprint("  --allHosts true|false     Scan all discovered hosts for running services (default false)");
+    ns.tprint("  --trendWindowSec <sec>    Rolling window for CashÎ” / NetWorthÎ” (default 120)");
+    ns.tprint("  --showCashDelta t|f       Show cash slope line (default true)");
+    ns.tprint("  --showNetWorthDelta t|f   Show net worth slope line (default true)");
+    ns.tprint("  --oneshotKeys <csv>       Service keys treated as oneshots (default backdoorJob,contractsJob)");
 }
 ```
 /* == END FILE == */
@@ -12957,6 +13852,7 @@ export function runDaemonLane(ns, cfg, targets, msgs) {
   const botnetScript = normScript(cfg.botnet);
   const traderScript = normScript(cfg.trader);
   const gangScript = normScript(cfg.gangManager);
+  const intTrainerScript = normScript(cfg.intTrainer);
 
   const pservArgs = normArgs(cfg.pservArgs || []);
 
@@ -13059,6 +13955,20 @@ export function runDaemonLane(ns, cfg, targets, msgs) {
     }
   } else {
     noteDisabledOnce("gangManager", gangScript);
+  }
+
+  // ------------------------------------------------------------
+  // intelligence trainer (idle-safe; Singularity)
+  // ------------------------------------------------------------
+  if (isEnabled("intTrainer")) {
+    msgs.push(
+      ...fmtEnsure(
+        ensureDaemon(ns, intTrainerScript, { host: "home", threads: 1, reserveRam: cfg.reserveRam }),
+        intTrainerScript
+      )
+    );
+  } else {
+    noteDisabledOnce("intTrainer", intTrainerScript);
   }
 }
 
@@ -14442,6 +15352,17 @@ export function getServiceRegistry() {
       lane: "jobs",
       notes: "Periodically scans and solves coding contracts.",
     },
+    {
+      key: "intTrainer",
+      name: "Intelligence Trainer",
+      script: "/bin/intelligence-trainer.js",
+      host: "home",
+      threads: 1,
+      managed: true,
+      lane: "daemon-lane",
+      notes: "Passive INT XP: create missing programs, else study CS (idle-safe).",
+    },
+
 
     // Optional helper daemons controller may run or call into.
     {
@@ -14484,6 +15405,7 @@ export function applyScriptOverrides(specs, flags) {
     pserv: "pserv",
     trader: "trader",
     gangManager: "gangManager",
+    intTrainer: "intTrainer",
     darkwebBuyer: "darkwebBuyer",
     controller: "controller",
 
@@ -16810,3 +17732,4 @@ function printHelp(ns) {
 }
 ```
 /* == END FILE == */
+

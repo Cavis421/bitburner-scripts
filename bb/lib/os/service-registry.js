@@ -118,6 +118,17 @@ export function getServiceRegistry() {
       lane: "jobs",
       notes: "Periodically scans and solves coding contracts.",
     },
+    {
+      key: "intTrainer",
+      name: "Intelligence Trainer",
+      script: "/bin/intelligence-trainer.js",
+      host: "home",
+      threads: 1,
+      managed: true,
+      lane: "daemon-lane",
+      notes: "Passive INT XP: create missing programs, else study CS (idle-safe).",
+    },
+
 
     // Optional helper daemons controller may run or call into.
     {
@@ -160,6 +171,7 @@ export function applyScriptOverrides(specs, flags) {
     pserv: "pserv",
     trader: "trader",
     gangManager: "gangManager",
+    intTrainer: "intTrainer",
     darkwebBuyer: "darkwebBuyer",
     controller: "controller",
 

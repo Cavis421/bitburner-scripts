@@ -17,6 +17,7 @@ export function runDaemonLane(ns, cfg, targets, msgs) {
   const botnetScript = normScript(cfg.botnet);
   const traderScript = normScript(cfg.trader);
   const gangScript = normScript(cfg.gangManager);
+  const intTrainerScript = normScript(cfg.intTrainer);
 
   const pservArgs = normArgs(cfg.pservArgs || []);
 
@@ -119,6 +120,20 @@ export function runDaemonLane(ns, cfg, targets, msgs) {
     }
   } else {
     noteDisabledOnce("gangManager", gangScript);
+  }
+
+  // ------------------------------------------------------------
+  // intelligence trainer (idle-safe; Singularity)
+  // ------------------------------------------------------------
+  if (isEnabled("intTrainer")) {
+    msgs.push(
+      ...fmtEnsure(
+        ensureDaemon(ns, intTrainerScript, { host: "home", threads: 1, reserveRam: cfg.reserveRam }),
+        intTrainerScript
+      )
+    );
+  } else {
+    noteDisabledOnce("intTrainer", intTrainerScript);
   }
 }
 
