@@ -113,9 +113,28 @@ export function runAugmentationTick(ns, state, msgs) {
       maxPurchasesPerCheck: 1, // slow down after gang as requested
     };
 
-    // Pre-corp: keep $150b reserved for corp creation bankroll
+    // Pre-corp: dynamic spending based on progression (installed augmentations).
+    // Goal: early/mid-game can buy hacking augs to accelerate income,
+    // while still preventing runaway “spend shock” before corp exists.
     if (!corp) {
-      opts.hardReserve = Math.max(Number(opts.hardReserve || 0), CORP_CREATION_RESERVE);
+      const a = Number(installedAugs || 0);
+
+      // More aggressive early, tighter later.
+      // Tune these thresholds later if you want; this is intentionally simple.
+      let cap = 0.20;
+      if (a < 5) cap = 0.50;
+      else if (a < 10) cap = 0.35;
+      else if (a < 15) cap = 0.25;
+      else cap = 0.20;
+
+      // Use existing reserve mechanics (no new system, no redesign)
+      opts.spendFracCap = cap;
+
+      // Keep a safety cash floor (defaults already include minReserve=1e9, but make it explicit)
+      opts.minReserve = Math.max(Number(opts.minReserve || 0), 1e9);
+
+      // IMPORTANT: remove the $150b hard block
+      opts.hardReserve = 0;
     } else {
       // Post-corp: mirror corp-lane spend governor (your requested option C)
       // Apply corp-lane reserveFunds and maxSpendFracPerCycle to PLAYER aug spending.
@@ -123,7 +142,6 @@ export function runAugmentationTick(ns, state, msgs) {
       opts.spendFracCap = Number(CORP_LANE_DEFAULTS.maxSpendFracPerCycle || 0.20);
     }
   }
-
   // ------------------------------------------------------------
   // 2) Run purchase pass
   // ------------------------------------------------------------

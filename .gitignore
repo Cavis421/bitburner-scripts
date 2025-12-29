@@ -1,61 +1,79 @@
-# ========
-# VS CODE
-# ========
+# =========================================================
+# DEFAULT: IGNORE EVERYTHING
+# =========================================================
+*
+
+# =========================================================
+# ALLOW CORE REPO FILES (adjust if desired)
+# =========================================================
+!.gitignore
+!README.md
+!LICENSE
+
+# =========================================================
+# ALLOW BITBURNER GAME FILES
+# =========================================================
+!bb/
+!bb/**
+
+# =========================================================
+# KEEP FOLDER STRUCTURE (optional but recommended)
+# =========================================================
+# Allow directories so Git can traverse into bb
+!*/
+
+# =========================================================
+# EXPLICITLY IGNORE TOOLING / GENERATED FILES
+# (even if accidentally placed under bb)
+# =========================================================
+bb/**/filesync.json
+bb/**/NetscriptDefinitions.d.ts
+
+# =========================================================
+# VS CODE / EDITOR
+# =========================================================
 .vscode/
 *.code-workspace
 
-# ========
-# Bitburner Tools
-# ========
-# Do not commit filesync config or Netscript definitions
-filesync.json
-NetscriptDefinitions.d.ts
+# =========================================================
+# BITBURNER / DEPRECATED EXTENSION
+# =========================================================
+.bitburner/
 settings.json
-Bitburner_Master_Codebase_v2.md 
+
+# =========================================================
+# GENERATED / REPORTS
+# =========================================================
+Bitburner_Master_Codebase_v2.md
 Bitburner_Master_Codebase_v3.md
 current_time.txt
-project-instructions.md 
+project-instructions.md
 
-# If using the deprecated VSCode extension:
-# .bitburner/ holds auth tokens & local config
-.bitburner/
-
-# ========
-# Logs / Temp / Cache
-# ========
+# =========================================================
+# LOGS / TEMP
+# =========================================================
 *.log
 *.tmp
 *.temp
 tmp/
 temp/
 
-# ========
+# =========================================================
 # OS JUNK
-# ========
+# =========================================================
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# Windows Explorer’s uploaded temp folder
 /.tmp.driveupload/
 
-# ========
-# SCRIPTS / UTILITIES
-# ========
-# Ignore PowerShell scripts if you don't want them in repo
+# =========================================================
+# SCRIPTS / UTILITIES (repo tools only)
+# =========================================================
 *.ps1
-
-# Ignore shell scripts
 *.sh
 
-# ========
-# NODE / NPM (Only if you use tooling)
-# ========
+# =========================================================
+# NODE / NPM (if tooling exists outside bb)
+# =========================================================
 node_modules/
 package-lock.json
-
-
-data/
-archive/
-legacy/
-
