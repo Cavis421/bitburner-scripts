@@ -4,28 +4,28 @@ This repository contains my **production Bitburner codebase**, structured and ma
 If it isnâ€™t in `bb/`, it does **not** exist in the game.
 ---
 ## Repository Structure
-/  
-â”œâ”€ bb/                     (Bitburner in-game filesystem â€“ ONLY synced content)  
-â”‚  â”œâ”€ bin/                 Entry points, daemons, controllers  
-â”‚  â”œâ”€ lib/                 Shared libraries and logic lanes  
-â”‚  â”œâ”€ workers/             Stateless worker scripts (HGW, batch pieces, etc.)  
-â”‚  â”œâ”€ apps/                Feature-specific tools (WSE, Hacknet, etc.)  
-â”‚  â””â”€ ui/                  Terminal / tail / dashboard UIs  
-â”‚  
-â”œâ”€ README.md               This file  
-â”œâ”€ .gitignore              Whitelist-based (tracks bb/ only)  
-â””â”€ tooling / docs / scripts (ignored by git)
+/
+bb/                  (Bitburner in-game filesystem ONLY synced content)
+  bin/                 Entry points, daemons, controllers
+  lib/                 Shared libraries and logic lanes
+  workers/             Stateless worker scripts (HGW, batch pieces, etc.)
+  apps/                Feature-specific tools (WSE, Hacknet, etc.)
+  ui/                  Terminal / tail / dashboard UIs
+
+README.md              This file
+.gitignore             Whitelist-based (tracks bb/ only)
+                       tooling / docs / scripts (ignored by git)
 ---
 ## Design Principles
-- **Single root of truth**  
+- **Single root of truth**
   `bb/` mirrors the Bitburner home filesystem exactly.
-- **Explicit automation lanes**  
+- **Explicit automation lanes**
   Hacking, Hacknet, Singularity, Gang, Player, WSE, and OS-style services are separated into focused lanes.
-- **Controller-driven orchestration**  
+- **Controller-driven orchestration**
   One main controller coordinates RAM-gated daemons, jobs, and policies.
-- **Restart-safe**  
+- **Restart-safe**
   Designed to survive BitNode resets, script restarts, and partial availability.
-- **Refactor-friendly**  
+- **Refactor-friendly**
   Large restructures are expected; tooling and layout are built to tolerate churn.
 ---
 ## Getting Started (In-Game)
