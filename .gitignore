@@ -9,6 +9,7 @@
 !.gitignore
 !README.md
 !LICENSE
+!Bitburner_Master_Codebase_v3.md
 
 # =========================================================
 # ALLOW BITBURNER GAME FILES
@@ -45,7 +46,6 @@ settings.json
 # GENERATED / REPORTS
 # =========================================================
 Bitburner_Master_Codebase_v2.md
-Bitburner_Master_Codebase_v3.md
 current_time.txt
 project-instructions.md
 
