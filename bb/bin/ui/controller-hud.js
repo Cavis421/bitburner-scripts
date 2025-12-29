@@ -156,6 +156,8 @@ function renderReport(ns, flags, cashTrend, netWorthTrend) {
     ns.print("");
     renderHacknetSection(ns);
     ns.print("");
+    renderBladeburnerSection(ns);
+    ns.print("");
     renderServicesSection(ns, flags);
     ns.print("");
 }
@@ -411,7 +413,78 @@ function renderHacknetSection(ns) {
 }
 
 // -----------------------------------------------------------------------------
-// 6) bbOS Services (ASCII-only; oneshots show IDLE)
+// 6) Bladeburner - compact (BN6 / SF7+)
+// -----------------------------------------------------------------------------
+function renderBladeburnerSection(ns) {
+    ns.print("== Bladeburner ==");
+
+    // API gate (SF7+ or BN6)
+    if (!ns.bladeburner || typeof ns.bladeburner.inBladeburner !== "function") {
+        ns.print("  Status: (Bladeburner API not available)");
+        return;
+    }
+
+    const inBB = safeBool(() => ns.bladeburner.inBladeburner(), false);
+    if (!inBB) {
+        ns.print("  Status: (not in Bladeburners)");
+        return;
+    }
+
+    const rank = safeNum(() => ns.bladeburner.getRank(), NaN);
+    const sp = safeNum(() => ns.bladeburner.getSkillPoints(), NaN);
+
+    const stamina = safeArr(() => ns.bladeburner.getStamina(), [NaN, NaN]);
+    const sta = Number(stamina?.[0] ?? NaN);
+    const staMax = Number(stamina?.[1] ?? NaN);
+    const staPct = (Number.isFinite(sta) && Number.isFinite(staMax) && staMax > 0)
+        ? (sta / staMax) * 100
+        : NaN;
+
+    const city = safeStr(() => ns.bladeburner.getCity(), "n/a");
+    const chaos = safeNum(() => ns.bladeburner.getCityChaos(city), NaN);
+
+    const cur = safeObj(() => ns.bladeburner.getCurrentAction(), null);
+    const curType = String(cur?.type ?? "n/a");
+    const curName = String(cur?.name ?? "n/a");
+
+    // Next BlackOp (best-effort; safe if API differs)
+    const blackOps = safeArr(() => ns.bladeburner.getBlackOpNames(), []);
+    let nextBlackOp = null;
+    for (const name of blackOps) {
+        const remaining = safeNum(() => ns.bladeburner.getActionCountRemaining("BlackOp", name), 0);
+        if (remaining > 0) {
+            nextBlackOp = name;
+            break;
+        }
+    }
+
+    const nextReq = nextBlackOp ? safeNum(() => ns.bladeburner.getBlackOpRank(nextBlackOp), NaN) : NaN;
+    const nextChancePair = nextBlackOp
+        ? safeArr(() => ns.bladeburner.getActionEstimatedSuccessChance("BlackOp", nextBlackOp), [NaN, NaN])
+        : [NaN, NaN];
+
+    const cLo = Number(nextChancePair?.[0] ?? NaN);
+    const cHi = Number(nextChancePair?.[1] ?? NaN);
+
+    ns.print(`  Rank:     ${Number.isFinite(rank) ? ns.formatNumber(rank, 2) : "n/a"} | SP: ${Number.isFinite(sp) ? ns.formatNumber(sp, 0) : "n/a"}`);
+    ns.print(`  Stamina:  ${Number.isFinite(sta) ? ns.formatNumber(sta, 1) : "n/a"} / ${Number.isFinite(staMax) ? ns.formatNumber(staMax, 1) : "n/a"} (${Number.isFinite(staPct) ? staPct.toFixed(1) + "%" : "n/a"})`);
+    ns.print(`  City:     ${city} | Chaos: ${Number.isFinite(chaos) ? chaos.toFixed(1) : "n/a"}`);
+    ns.print(`  Action:   ${curType}:${curName}`);
+
+    if (nextBlackOp) {
+        const reqStr = Number.isFinite(nextReq) ? ns.formatNumber(nextReq, 0) : "n/a";
+        const chStr = (Number.isFinite(cLo) && Number.isFinite(cHi))
+            ? `${(cLo * 100).toFixed(1)}–${(cHi * 100).toFixed(1)}%`
+            : "n/a";
+        ns.print(`  Next BO:  ${nextBlackOp} | ReqRank: ${reqStr} | Chance: ${chStr}`);
+    } else {
+        ns.print("  Next BO:  (none available / all complete)");
+    }
+}
+
+
+// -----------------------------------------------------------------------------
+// 7) bbOS Services (ASCII-only; oneshots show IDLE)
 // -----------------------------------------------------------------------------
 function renderServicesSection(ns, flags) {
     ns.print("== bbOS Services ==");
@@ -649,6 +722,14 @@ function safeBool(fn, fallback) {
         return typeof v === "boolean" ? v : fallback;
     } catch { return fallback; }
 }
+
+function safeStr(fn, fallback) {
+    try {
+        const v = fn();
+        return (v === null || v === undefined) ? fallback : String(v);
+    } catch { return fallback; }
+}
+
 
 /** @param {NS} ns */
 function printHelp(ns) {

@@ -17,6 +17,7 @@ export function runDaemonLane(ns, cfg, targets, msgs) {
   const botnetScript = normScript(cfg.botnet);
   const traderScript = normScript(cfg.trader);
   const gangScript = normScript(cfg.gangManager);
+  const bladeburnerScript = normScript(cfg.bladeburnerManager);
   const intTrainerScript = normScript(cfg.intTrainer);
 
   const pservArgs = normArgs(cfg.pservArgs || []);
@@ -135,7 +136,25 @@ export function runDaemonLane(ns, cfg, targets, msgs) {
   } else {
     noteDisabledOnce("intTrainer", intTrainerScript);
   }
+
+
+  // ------------------------------------------------------------
+  // Bladeburner manager (BN6 / SF7+)
+  // ------------------------------------------------------------
+  if (isEnabled("bladeburnerManager")) {
+    const bbRes = ensureDaemon(ns, bladeburnerScript, {
+      host: "home",
+      threads: 1,
+      args: [], // keep daemon args inside the script for now
+      reserveRam: cfg.reserveRam,
+    });
+
+    if (bbRes?.action && msgs) msgs.push(`[svc] bladeburner: ${bbRes.action}`);
+  } else {
+    noteDisabledOnce("bladeburnerManager", bladeburnerScript);
+  }
 }
+
 
 function ensureWithArgsPolicy(ns, script, args, cfg, msgs) {
   let res = ensureDaemon(ns, script, {

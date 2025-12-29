@@ -67,6 +67,7 @@ const FLAGS = [
   ["pserv", "bin/pserv-manager.js"],
   ["trader", "bin/basic-trader.js"],
   ["gangManager", "bin/gang-manager.js"],
+  ["bladeburnerManager", "/bin/bladeburner-manager.js"],
   ["intTrainer", "bin/intelligence-trainer.js"],
 
 
@@ -136,8 +137,10 @@ export async function main(ns) {
     pserv: String(flags.pserv),
     trader: String(flags.trader),
     gangManager: String(flags.gangManager),
+    bladeburnerManager: String(flags.bladeburnerManager),
     intTrainer: String(flags.intTrainer),
     darkwebBuyer: String(flags.darkwebBuyer),
+
 
     // bbOS service enablement
     services: !!flags.services,
@@ -351,7 +354,7 @@ function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
     gangManager: !!effective.gangManager,
     intTrainer: !!effective.intTrainer,
     darkwebBuyer: !!effective.darkwebBuyer,
-
+    bladeburnerManager: !!effective.bladeburnerManager, // NEW
     backdoorJob: !!effective.backdoorJob,
     contractsJob: !!effective.contractsJob,
   };
@@ -365,6 +368,7 @@ function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
     `trader=${cfg.servicesEnabled.trader ? "1" : "0"}`,
     `gangManager=${cfg.servicesEnabled.gangManager ? "1" : "0"}`,
     `intTrainer=${cfg.servicesEnabled.intTrainer ? "1" : "0"}`,
+    `bladeburnerManager=${cfg.servicesEnabled.bladeburnerManager ? "1" : "0"}`,
     `darkwebBuyer=${cfg.servicesEnabled.darkwebBuyer ? "1" : "0"}`,
     `backdoorJob=${cfg.servicesEnabled.backdoorJob ? "1" : "0"}`,
     `contractsJob=${cfg.servicesEnabled.contractsJob ? "1" : "0"}`,
@@ -379,6 +383,7 @@ function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
       `pserv=${cfg.servicesEnabled.pserv ? "ON" : "OFF"} ` +
       `trader=${cfg.servicesEnabled.trader ? "ON" : "OFF"} ` +
       `gangManager=${cfg.servicesEnabled.gangManager ? "ON" : "OFF"} ` +
+      `bladeburnerManager=${cfg.servicesEnabled.bladeburnerManager ? "ON" : "OFF"} ` +
       `intTrainer=${cfg.servicesEnabled.intTrainer ? "ON" : "OFF"} ` +
       `darkwebBuyer=${cfg.servicesEnabled.darkwebBuyer ? "ON" : "OFF"} ` +
       `backdoorJob=${cfg.servicesEnabled.backdoorJob ? "ON" : "OFF"} ` +

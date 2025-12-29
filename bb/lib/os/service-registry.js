@@ -118,6 +118,7 @@ export function getServiceRegistry() {
       lane: "jobs",
       notes: "Periodically scans and solves coding contracts.",
     },
+
     {
       key: "intTrainer",
       name: "Intelligence Trainer",
@@ -128,6 +129,18 @@ export function getServiceRegistry() {
       lane: "daemon-lane",
       notes: "Passive INT XP: create missing programs, else study CS (idle-safe).",
     },
+
+    {
+      key: "bladeburnerManager",
+      name: "Bladeburner Manager",
+      script: "/bin/bladeburner-manager.js",
+      host: "home",
+      threads: 1,
+      managed: true,
+      lane: "daemon-lane",
+      notes: "BN6 Bladeburner automation: join/skills/city/actions/blackops.",
+    },
+
 
 
     // Optional helper daemons controller may run or call into.
@@ -172,6 +185,7 @@ export function applyScriptOverrides(specs, flags) {
     trader: "trader",
     gangManager: "gangManager",
     intTrainer: "intTrainer",
+    bladeburnerManager: "bladeburnerManager",
     darkwebBuyer: "darkwebBuyer",
     controller: "controller",
 
