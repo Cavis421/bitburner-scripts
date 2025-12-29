@@ -298,14 +298,14 @@ function choosePrimaryTarget(ns) {
     const h = scored[i];
     ns.tprint(
       `${i + 1}. ${h.host} | ` +
-        `Score=${h.score.toExponential(2)} | ` +
-        `Money=${fmtMoney(ns, h.maxMoney)} | ` +
-        `ReqHack=${h.reqHack} | ` +
-        `Chance=${(h.chance * 100).toFixed(1)}% | ` +
-        `Sec=${h.minSec.toFixed(1)} | ` +
-        `T=${(h.tHack / 1000).toFixed(1)}s | ` +
-        `hackRatio=${(h.hackRatio * 100).toFixed(0)}% | ` +
-        `$/sec=${fmtMoney(ns, h.moneyPerSec * 1000)}`
+      `Score=${h.score.toExponential(2)} | ` +
+      `Money=${fmtMoney(ns, h.maxMoney)} | ` +
+      `ReqHack=${h.reqHack} | ` +
+      `Chance=${(h.chance * 100).toFixed(1)}% | ` +
+      `Sec=${h.minSec.toFixed(1)} | ` +
+      `T=${(h.tHack / 1000).toFixed(1)}s | ` +
+      `hackRatio=${(h.hackRatio * 100).toFixed(0)}% | ` +
+      `$/sec=${fmtMoney(ns, h.moneyPerSec * 1000)}`
     );
   }
 
@@ -395,11 +395,11 @@ function chooseXpTarget(ns, primary) {
     const h = scored[i];
     ns.tprint(
       `${i + 1}. ${h.host} | ` +
-        `XPScore=${h.score.toExponential(2)} | ` +
-        `ReqHack=${h.reqHack} | ` +
-        `Chance=${(h.chance * 100).toFixed(1)}% | ` +
-        `T=${(h.tHack / 1000).toFixed(1)}s | ` +
-        `hackRatio=${(h.hackRatio * 100).toFixed(0)}%`
+      `XPScore=${h.score.toExponential(2)} | ` +
+      `ReqHack=${h.reqHack} | ` +
+      `Chance=${(h.chance * 100).toFixed(1)}% | ` +
+      `T=${(h.tHack / 1000).toFixed(1)}s | ` +
+      `hackRatio=${(h.hackRatio * 100).toFixed(0)}%`
     );
   }
 
@@ -514,11 +514,11 @@ export async function main(ns) {
   ns.tprint(
     USE_LOW_RAM_MODE
       ? `Low-RAM batch mode ENABLED for timed-net-batcher2.js (home=${homeMaxRam.toFixed(
-          1
-        )}GB, min pserv=${minPservRam || 0}GB).`
+        1
+      )}GB, min pserv=${minPservRam || 0}GB).`
       : `Full batch mode (no --lowram) for timed-net-batcher2.js (home=${homeMaxRam.toFixed(
-          1
-        )}GB, min pserv=${minPservRam || 0}GB).`
+        1
+      )}GB, min pserv=${minPservRam || 0}GB).`
   );
 
   const override = flags._[0] || null;
@@ -553,12 +553,12 @@ export async function main(ns) {
   //  - corp/agri-sales.js
   ns.tprint(
     "STARTUP-HOME: Killing all processes on home " +
-      "(except startup + corp/agri-structure.js + corp/agri-inputs.js + corp/agri-sales.js)."
+    "(except startup and bootstrap.js)."
   );
 
   const myPid = ns.pid;
 
-  const keepFiles = new Set(["corp/agri-structure.js", "corp/agri-inputs.js", "corp/agri-sales.js"]);
+  const keepFiles = new Set(["bin/bootstrap.js"]);
   const processes = ns.ps("home");
 
   for (const p of processes) {
@@ -578,14 +578,14 @@ export async function main(ns) {
 
   ns.tprint(`ROOT PASS: rooted=${before.rooted}/${before.attempted} newly-rootable targets (attempted).`);
 
-  // Optional: if you still want /bin/root-and-deploy.js to do copying/backdoor/etc
+  // Optional: if you still want bin/root-and-deploy.js to do copying/backdoor/etc
   // we can start it, but we no longer *depend* on it for initial rooting.
-  if (ns.fileExists("/bin/root-and-deploy.js", "home")) {
-    const pid = ns.exec("/bin/root-and-deploy.js", "home", 1);
-    if (pid === 0) ns.tprint("WARN: Failed to launch /bin/root-and-deploy.js (continuing).");
+  if (ns.fileExists("bin/root-and-deploy.js", "home")) {
+    const pid = ns.exec("bin/root-and-deploy.js", "home", 1);
+    if (pid === 0) ns.tprint("WARN: Failed to launch bin/root-and-deploy.js (continuing).");
     else ns.tprint(`Started ROOT + DEPLOY daemon (pid ${pid}).`);
   } else {
-    ns.tprint("WARN: /bin/root-and-deploy.js missing; relying on startup rooting pass only.");
+    ns.tprint("WARN: bin/root-and-deploy.js missing; relying on startup rooting pass only.");
   }
 
   // Keep trying briefly in case you just bought a cracker / leveled / etc.
@@ -612,18 +612,18 @@ export async function main(ns) {
 
   // 1) Launch MONEY BATCHER (now target should be rooted)
   const batcherArgs = USE_LOW_RAM_MODE ? [batchTarget, "--lowram"] : [batchTarget];
-  const batcherRamCost = cost("/bin/timed-net-batcher2.js", 1);
+  const batcherRamCost = cost("bin/timed-net-batcher2.js", 1);
 
   if (isFinite(batcherRamCost)) {
     if (batcherRamCost > maxRam) {
       ns.tprint(
-        "MONEY BATCHER (/bin/timed-net-batcher2.js) alone needs " +
-          `${batcherRamCost.toFixed(1)}GB, which exceeds home RAM (${maxRam.toFixed(1)}GB).`
+        "MONEY BATCHER (bin/timed-net-batcher2.js) alone needs " +
+        `${batcherRamCost.toFixed(1)}GB, which exceeds home RAM (${maxRam.toFixed(1)}GB).`
       );
     } else {
-      const pid = ns.exec("/bin/timed-net-batcher2.js", "home", 1, ...batcherArgs);
+      const pid = ns.exec("bin/timed-net-batcher2.js", "home", 1, ...batcherArgs);
 
-      if (pid === 0) ns.tprint("Failed to launch MONEY BATCHER (/bin/timed-net-batcher2.js).");
+      if (pid === 0) ns.tprint("Failed to launch MONEY BATCHER (bin/timed-net-batcher2.js).");
       else {
         usedPlanned = ns.getServerUsedRam("home");
         ns.tprint(`Started REQUIRED MONEY BATCHER (pid ${pid}) ${JSON.stringify(batcherArgs)}`);
@@ -634,7 +634,7 @@ export async function main(ns) {
   // 2) Launch BOTNET after rooting is handled (FIX)
   // NOTE: This is the big race fix vs your old ordering.
   {
-    const botnetRam = cost("/bin/botnet-hgw-sync.js", 1);
+    const botnetRam = cost("bin/botnet-hgw-sync.js", 1);
 
     if (isFinite(botnetRam)) {
       const futureUsed = usedPlanned + botnetRam;
@@ -642,9 +642,9 @@ export async function main(ns) {
       if (futureUsed > budget) {
         ns.tprint(`Skipping BOTNET HGW SYNC - would exceed budget ${futureUsed.toFixed(1)}GB > ${budget.toFixed(1)}GB`);
       } else {
-        const pid = ns.exec("/bin/botnet-hgw-sync.js", "home", 1, hgwTarget, hgwMode);
+        const pid = ns.exec("bin/botnet-hgw-sync.js", "home", 1, hgwTarget, hgwMode);
 
-        if (pid === 0) ns.tprint("Failed to launch BOTNET HGW SYNC (/bin/botnet-hgw-sync.js).");
+        if (pid === 0) ns.tprint("Failed to launch BOTNET HGW SYNC (bin/botnet-hgw-sync.js).");
         else {
           usedPlanned = ns.getServerUsedRam("home");
           ns.tprint(`Started BOTNET HGW SYNC (pid ${pid}) [${hgwTarget}, ${hgwMode}]`);
@@ -658,7 +658,7 @@ export async function main(ns) {
 
   if (wantPserv) {
     plan.push({
-      name: "/bin/pserv-manager.js",
+      name: "bin/pserv-manager.js",
       threads: 1,
       args: [PSERV_TARGET_RAM],
       label: "PSERV MANAGER",
@@ -718,7 +718,7 @@ export async function main(ns) {
 
   ns.tprint(
     "STARTUP-HOME COMPLETE - automation online. " +
-      `Home RAM: ${maxRam.toFixed(1)}GB, reserve: ${HOME_RAM_RESERVE.toFixed(1)}GB.`
+    `Home RAM: ${maxRam.toFixed(1)}GB, reserve: ${HOME_RAM_RESERVE.toFixed(1)}GB.`
   );
 }
 
@@ -726,7 +726,7 @@ export async function main(ns) {
 // Help Function
 // --------------------------------------------------
 function printHelp(ns) {
-  ns.tprint("/bin/startup-home-advanced.js");
+  ns.tprint("bin/startup-home-advanced.js");
   ns.tprint("");
 
   ns.tprint("Description");
@@ -734,11 +734,11 @@ function printHelp(ns) {
   ns.tprint("  Picks a batch target, chooses an HGW target for XP or money,");
   ns.tprint("  kills existing scripts on home (except itself and corp/agri-* helpers),");
   ns.tprint("  ROOTS all currently-rootable servers (fixes ordering/race), then launches:");
-  ns.tprint("    - /bin/timed-net-batcher2.js");
-  ns.tprint("    - /bin/botnet-hgw-sync.js");
-  ns.tprint("  Optionally launches /bin/root-and-deploy.js as a daemon for extra deploy work.");
+  ns.tprint("    - bin/timed-net-batcher2.js");
+  ns.tprint("    - bin/botnet-hgw-sync.js");
+  ns.tprint("  Optionally launches bin/root-and-deploy.js as a daemon for extra deploy work.");
   ns.tprint("  Optional extras via --extras:");
-  ns.tprint("    - /bin/pserv-manager.js");
+  ns.tprint("    - bin/pserv-manager.js");
   ns.tprint("    - hacknet/hacknet-smart.js");
   ns.tprint("    - ui/ops-dashboard.js (one-shot dashboard)");
   ns.tprint("");
@@ -751,14 +751,14 @@ function printHelp(ns) {
   ns.tprint("");
 
   ns.tprint("Syntax");
-  ns.tprint("  run /bin/startup-home-advanced.js");
-  ns.tprint("  run /bin/startup-home-advanced.js --extras pserv");
-  ns.tprint("  run /bin/startup-home-advanced.js --extras pserv,hacknet,ui");
-  ns.tprint("  run /bin/startup-home-advanced.js --extras all");
-  ns.tprint("  run /bin/startup-home-advanced.js omega-net");
-  ns.tprint("  run /bin/startup-home-advanced.js --hgw xp");
-  ns.tprint("  run /bin/startup-home-advanced.js omega-net --hgw money --extras ui");
-  ns.tprint("  run /bin/startup-home-advanced.js --help");
+  ns.tprint("  run bin/startup-home-advanced.js");
+  ns.tprint("  run bin/startup-home-advanced.js --extras pserv");
+  ns.tprint("  run bin/startup-home-advanced.js --extras pserv,hacknet,ui");
+  ns.tprint("  run bin/startup-home-advanced.js --extras all");
+  ns.tprint("  run bin/startup-home-advanced.js omega-net");
+  ns.tprint("  run bin/startup-home-advanced.js --hgw xp");
+  ns.tprint("  run bin/startup-home-advanced.js omega-net --hgw money --extras ui");
+  ns.tprint("  run bin/startup-home-advanced.js --help");
 }
 
 // ooo fixed

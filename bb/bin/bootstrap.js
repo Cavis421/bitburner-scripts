@@ -30,11 +30,11 @@ const FLAGS = [
   ["stage2Ram", 1024],
 
   // Stage scripts
-  ["stage1", "/bin/early-money.js"],
-  ["stage2", "/bin/startup-home-advanced.js"],
+  ["stage1", "bin/early-money.js"],
+  ["stage2", "bin/startup-home-advanced.js"],
 
   // Controller
-  ["controller", "/bin/controller.js"],
+  ["controller", "bin/controller.js"],
   ["controllerThreads", 1],
 
   // Behavior
