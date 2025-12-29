@@ -1,6 +1,6 @@
 ﻿# Bitburner Master Codebase v3
 
-> Auto-generated on 2025-12-28 20:07:39.
+> Auto-generated on 2025-12-28 20:56:10.
 
 > Root: C:\Users\campi\projects\bitburner-scripts2\bb
 
@@ -88,6 +88,7 @@
 - workers/hwgw/batch-weaken.js
 
 /* == END INDEX == */
+
 
 /* == FILE: apps/hacknet/hacknet-smart.js == */
 ```js
@@ -604,598 +605,313 @@ Notes:
 /* == FILE: bin/basic-trader.js == */
 ```js
 /**
-
  * /bin/basic-trader.js
-
  *
-
  * Automated WSE trader using TIX + 4S Market Data TIX API:
-
  *  - Long on strong upward forecasts
-
  *  - Short on strong downward forecasts (if unlocked)
-
  *  - Portfolio exposure caps
-
  *  - Full per-trade P/L tracking + session summary
-
  *  - Heartbeat + candidate stats (so "idle" doesn't look like "dead")
-
  *
-
  * @param {NS} ns
-
  */
-
 export async function main(ns) {
-
   const flags = ns.flags([
-
     ["help", false],
-
     ["loop", true],
-
     ["symbols", ""],
-
     // Capital controls
-
     ["reserve", 0.10],
-
     ["max-total-frac", 0.80],
-
     ["max-symbol-frac", 0.20],
-
     // Forecast thresholds
-
     ["long-enter", 0.60],
-
     ["long-exit", 0.52],
-
     ["short-enter", 0.40],
-
     ["short-exit", 0.48],
-
     // Diagnostics
-
     ["heartbeat", 60], // seconds between heartbeat lines (set 0 to disable)
-
   ]);
-
   if (flags.help) {
-
     printHelp(ns);
-
     return;
-
   }
-
   ns.disableLog("ALL");
-
   if (!ns.stock.hasTIXAPIAccess() || !ns.stock.has4SDataTIXAPI()) {
-
     ns.tprint("ERROR: Requires WSE TIX API + 4S Market Data TIX API.");
-
     return;
-
   }
-
   const allowShorts = canShortStocks(ns);
-
   if (!allowShorts) {
-
     ns.tprint("basic-trader: shorting locked; running LONG-ONLY.");
-
   }
-
   const symbols = resolveSymbols(ns, flags.symbols);
-
   const reserveFrac   = clamp01(flags.reserve);
-
   const maxTotalFrac  = clamp01(flags["max-total-frac"]);
-
   const maxSymbolFrac = clamp01(flags["max-symbol-frac"]);
-
   const heartbeatSec = Math.max(0, Number(flags.heartbeat) || 0);
-
   let nextHeartbeatAt = Date.now() + heartbeatSec * 1000;
-
   // -------------------------------------------------------------------------
-
   // State
-
   // -------------------------------------------------------------------------
-
   const positions = new Map(); // sym -> { dir, shares, entryPrice }
-
   const stats = {
-
     trades: 0,
-
     wins: 0,
-
     losses: 0,
-
     netPnl: 0,
-
   };
-
   ns.tprint(
-
     `basic-trader: ${symbols.length} symbols | ` +
-
       `Reserve ${(reserveFrac * 100).toFixed(0)}% | ` +
-
       `MaxTotal ${(maxTotalFrac * 100).toFixed(0)}% | ` +
-
       `MaxSymbol ${(maxSymbolFrac * 100).toFixed(0)}% | ` +
-
       `LongEnter=${Number(flags["long-enter"]).toFixed(2)} LongExit=${Number(flags["long-exit"]).toFixed(2)}`,
-
   );
-
   // -------------------------------------------------------------------------
-
   // Main loop
-
   // -------------------------------------------------------------------------
-
   while (true) {
-
     const state = getPortfolioState(ns, symbols, allowShorts);
-
     // Heartbeat: prove liveness + explain why we might be idle.
-
     if (heartbeatSec > 0 && Date.now() >= nextHeartbeatAt) {
-
       const diag = getSignalDiagnostics(ns, symbols, flags, allowShorts);
-
       const openCount = countOpenPositions(ns, symbols, allowShorts);
-
       ns.print(
-
         `[HEARTBEAT] cash=${fmtMoney(ns, state.cash)} ` +
-
           `longExp=${fmtMoney(ns, state.longExposure)} ` +
-
           `shortExp=${fmtMoney(ns, state.shortExposure)} ` +
-
           `open=${openCount} ` +
-
           `candidates(long>=${Number(flags["long-enter"]).toFixed(2)})=${diag.longCandidates}/${symbols.length} ` +
-
           `bestFc=${diag.bestForecast.toFixed(3)}(${diag.bestSym})`,
-
       );
-
       nextHeartbeatAt = Date.now() + heartbeatSec * 1000;
-
     }
-
     for (const sym of symbols) {
-
       tradeSymbol(ns, sym, flags, {
-
         allowShorts,
-
         reserveFrac,
-
         maxTotalFrac,
-
         maxSymbolFrac,
-
         state,
-
         positions,
-
         stats,
-
       });
-
     }
-
     if (!flags.loop) break;
-
     await ns.sleep(6_000);
-
   }
-
 }
 
 // ---------------------------------------------------------------------------
-
 // Trading logic
-
 // ---------------------------------------------------------------------------
-
 function tradeSymbol(ns, sym, flags, ctx) {
-
   const {
-
     allowShorts,
-
     reserveFrac,
-
     maxTotalFrac,
-
     maxSymbolFrac,
-
     state,
-
     positions,
-
     stats,
-
   } = ctx;
-
   const forecast = ns.stock.getForecast(sym);
-
   // Use bid/ask for more realistic sizing + liquidation math
-
   const bid = ns.stock.getBidPrice(sym);
-
   const ask = ns.stock.getAskPrice(sym);
-
   // Read REAL position from the API (source of truth)
-
   const [longShares, longAvg, shortShares, shortAvg] = ns.stock.getPosition(sym);
-
   // ----- EXIT (real position based) -----
-
   if (longShares > 0) {
-
     if (forecast <= flags["long-exit"]) {
-
       exitPosition(ns, sym, bid, { dir: "LONG", shares: longShares, entryPrice: longAvg }, stats);
-
       positions.delete(sym); // keep your map tidy
-
     }
-
     return;
-
   }
-
   if (allowShorts && shortShares > 0) {
-
     if (forecast >= flags["short-exit"]) {
-
       exitPosition(ns, sym, ask, { dir: "SHORT", shares: shortShares, entryPrice: shortAvg }, stats);
-
       positions.delete(sym);
-
     }
-
     return;
-
   }
-
   // ----- ENTRY -----
-
   const cash = ns.getServerMoneyAvailable("home");
-
   const usableCash = cash * (1 - reserveFrac);
-
   // Keep your portfolio-caps concept, but use the current state
-
   const equity = state.cash + state.longExposure; // (your existing definition)
-
   const totalRoom = equity * maxTotalFrac - (state.longExposure + state.shortExposure);
-
   const symbolRoom = equity * maxSymbolFrac;
-
   let alloc = Math.min(usableCash, totalRoom, symbolRoom);
-
   if (alloc <= 0) return;
-
   // Cap by max shares remaining
-
   const maxShares = ns.stock.getMaxShares(sym);
-
   const remainingLongRoom = Math.max(0, maxShares - longShares);
-
   // Be conservative: size off ASK (what you pay)
-
   let desiredShares = Math.floor(alloc / ask);
-
   desiredShares = Math.min(desiredShares, remainingLongRoom);
-
   if (desiredShares <= 0) return;
-
   if (forecast >= flags["long-enter"]) {
-
     const bought = ns.stock.buyStock(sym, desiredShares);
-
     // IMPORTANT: only claim a buy if it actually happened
-
     if (bought > 0) {
-
       const newPos = ns.stock.getPosition(sym);
-
       positions.set(sym, { dir: "LONG", shares: newPos[0], entryPrice: newPos[1] });
-
       ns.print(`[${sym}] Enter LONG ${bought}/${desiredShares} @ ${fmtMoney(ns, ask)}`);
-
     } else {
-
       ns.print(`[${sym}] BUY FAILED (requested ${desiredShares}) fc=${forecast.toFixed(3)} cash=${fmtMoney(ns, cash)}`);
-
     }
-
     return;
-
   }
-
   if (allowShorts && forecast <= flags["short-enter"]) {
-
     const remainingShortRoom = Math.max(0, maxShares - shortShares);
-
     let desiredShort = Math.floor(alloc / bid); // proceeds roughly based on bid
-
     desiredShort = Math.min(desiredShort, remainingShortRoom);
-
     if (desiredShort <= 0) return;
-
     const shorted = ns.stock.buyShort(sym, desiredShort);
-
     if (shorted > 0) {
-
       const newPos = ns.stock.getPosition(sym);
-
       positions.set(sym, { dir: "SHORT", shares: newPos[2], entryPrice: newPos[3] });
-
       ns.print(`[${sym}] Enter SHORT ${shorted}/${desiredShort} @ ${fmtMoney(ns, bid)}`);
-
     } else {
-
       ns.print(`[${sym}] SHORT FAILED (requested ${desiredShort}) fc=${forecast.toFixed(3)} cash=${fmtMoney(ns, cash)}`);
-
     }
-
   }
-
 }
 
 // ---------------------------------------------------------------------------
-
 // Exit + P/L accounting
-
 // ---------------------------------------------------------------------------
-
 function exitPosition(ns, sym, exitPrice, pos, stats) {
-
   const { dir, shares, entryPrice } = pos;
-
   if (dir === "LONG") {
-
     ns.stock.sellStock(sym, shares);
-
   } else {
-
     ns.stock.sellShort(sym, shares);
-
   }
-
   const pnl =
-
     dir === "LONG"
-
       ? (exitPrice - entryPrice) * shares
-
       : (entryPrice - exitPrice) * shares;
-
   const pct = (pnl / (entryPrice * shares)) * 100;
-
   stats.trades++;
-
   stats.netPnl += pnl;
-
   pnl >= 0 ? stats.wins++ : stats.losses++;
-
   ns.print(
-
     `[${sym}] Exit ${dir} ${shares} @ ${fmtMoney(ns, exitPrice)} | ` +
-
       `P/L=${fmtSignedMoney(ns, pnl)} (${pct.toFixed(2)}%)`,
-
   );
-
   printSummary(ns, stats);
-
 }
 
 // ---------------------------------------------------------------------------
-
 // Portfolio helpers
-
 // ---------------------------------------------------------------------------
-
 function getPortfolioState(ns, symbols, allowShorts) {
-
   let longExposure = 0;
-
   let shortExposure = 0;
-
   for (const sym of symbols) {
-
     const price = ns.stock.getPrice(sym);
-
     const [l, , s] = ns.stock.getPosition(sym);
-
     longExposure += l * price;
-
     if (allowShorts) shortExposure += s * price;
-
   }
-
   const cash = ns.getServerMoneyAvailable("home");
-
   return { cash, longExposure, shortExposure };
-
 }
-
 function countOpenPositions(ns, symbols, allowShorts) {
-
   let count = 0;
-
   for (const sym of symbols) {
-
     const [l, , s] = ns.stock.getPosition(sym);
-
     if (l > 0) count++;
-
     if (allowShorts && s > 0) count++;
-
   }
-
   return count;
-
 }
 
 function getSignalDiagnostics(ns, symbols, flags, allowShorts) {
-
   let longCandidates = 0;
-
   let bestForecast = -1;
-
   let bestSym = "?";
-
   for (const sym of symbols) {
-
     const fc = ns.stock.getForecast(sym);
-
     if (fc >= flags["long-enter"]) longCandidates++;
-
     if (fc > bestForecast) {
-
       bestForecast = fc;
-
       bestSym = sym;
-
     }
-
   }
-
   return { longCandidates, bestForecast, bestSym };
-
 }
 
 // ---------------------------------------------------------------------------
-
 // Stats output
-
 // ---------------------------------------------------------------------------
-
 function printSummary(ns, stats) {
-
   const winRate =
-
     stats.trades > 0 ? (stats.wins / stats.trades) * 100 : 0;
-
   ns.print(
-
     `[SUMMARY] Trades=${stats.trades} | ` +
-
       `Wins=${stats.wins} | Losses=${stats.losses} | ` +
-
       `WinRate=${winRate.toFixed(1)}% | ` +
-
       `Net P/L=${fmtSignedMoney(ns, stats.netPnl)}`,
-
   );
-
 }
 
 // ---------------------------------------------------------------------------
-
 // Helpers + help
-
 // ---------------------------------------------------------------------------
 
 function canShortStocks(ns) {
-
   try {
-
     ns.stock.buyShort("ECP", 0);
-
     return true;
-
   } catch {
-
     return false;
-
   }
-
 }
 
 function resolveSymbols(ns, csv) {
-
   if (!csv) return ns.stock.getSymbols();
-
   return csv.split(",").map(s => s.trim()).filter(Boolean);
-
 }
 
 function clamp01(x) {
-
   return Math.min(1, Math.max(0, Number(x) || 0));
-
 }
 
 function fmtMoney(ns, v) {
-
   if (typeof ns.formatMoney === "function") return ns.formatMoney(v);
-
   return `$${ns.formatNumber(v)}`;
-
 }
 
 function fmtSignedMoney(ns, v) {
-
   const sign = v >= 0 ? "+" : "-";
-
   return `${sign}${fmtMoney(ns, Math.abs(v))}`;
-
 }
 
 function printHelp(ns) {
-
   ns.tprint("/bin/basic-trader.js");
-
   ns.tprint("");
-
   ns.tprint("Description");
-
   ns.tprint("  Forecast-based stock trader with portfolio caps and full P/L tracking.");
-
   ns.tprint("  Includes heartbeat diagnostics so idle periods are visible.");
-
   ns.tprint("");
-
   ns.tprint("Notes");
-
   ns.tprint("  - Requires WSE TIX API + 4S Market Data TIX API.");
-
   ns.tprint("  - Shorting auto-detected (BN8 / SF8.2).");
-
   ns.tprint("  - Heartbeat prints cash/exposure + candidate counts.");
-
   ns.tprint("");
-
   ns.tprint("Syntax");
-
   ns.tprint("  run /bin/basic-trader.js");
-
   ns.tprint("  run /bin/basic-trader.js --heartbeat 30");
-
   ns.tprint("  run /bin/basic-trader.js --heartbeat 0      # disable heartbeat");
-
   ns.tprint("  run /bin/basic-trader.js --long-enter 0.58  # more active");
-
   ns.tprint("  run /bin/basic-trader.js --help");
-
 }
-
-//update: 2025-12-13 13:25 
 ```
 /* == END FILE == */
 
@@ -2520,1465 +2236,903 @@ function printHelp(ns) {
 /* == FILE: bin/gang-manager.js == */
 ```js
 /** @param {NS} ns */
-
 export async function main(ns) {
-
   const flags = ns.flags([
-
     ["help", false],
-
     ["tail", false],
-
     ["tick", 2000],
 
     // Logging
-
     ["logMode", "changes"], // changes | always | silent
-
     ["showRoster", true],
 
     // Equipment buying
-
     ["buyEquip", true],
-
-    ["equipBudget", 0.03],  // fraction of available money allowed per tick (NORMAL mode)
-
-    ["equipMinCash", 1e9],  // don't buy unless player has at least this much cash (NORMAL mode)
+    ["equipBudget", 0.03], // fraction of available money allowed per tick (NORMAL mode)
+    ["equipMinCash", 1e9], // don't buy unless player has at least this much cash (NORMAL mode)
 
     // Debug
-
     ["equipDebug", false],
-
   ]);
 
   if (flags.help) return printHelp(ns);
-
   if (flags.tail) ns.tail();
 
   // QoL: reduce tail spam
-
   ns.disableLog("sleep");
-
   ns.disableLog("getServerMoneyAvailable");
-
   ns.disableLog("gang.setMemberTask");
-
   ns.disableLog("gang.setTerritoryWarfare");
 
   if (!ns.gang.inGang()) {
-
     ns.tprint("ERROR: You are not in a gang.");
-
     return;
-
   }
 
   // --- INTERNAL POLICY (minimal flags) ---
-
   const cfg = {
-
     tick: Number(flags.tick),
 
     // Wanted control
-
-    targetPenalty: 0.995,     // 99.5%
-
-    penaltyBuffer: 0.0004,    // exit recovery at target + buffer
+    targetPenalty: 0.995, // 99.5%
+    penaltyBuffer: 0.0004, // exit recovery at target + buffer
 
     // Training hysteresis (base; will scale dynamically)
-
     minTrainBase: 200,
-
     minTrainCap: 5000,
-
     trainHysteresis: 50,
 
     // Tasks
-
     moneyTask: "Human Trafficking",
-
     trainTask: "Train Combat",
-
     vigilanteTask: "Vigilante Justice",
-
     territoryTask: "Territory Warfare",
 
     // Respect task tiers (auto-upgrade by stats)
-
     // NOTE: We will also CAP these tiers based on wanted headroom.
-
     respectTiers: [
-
-      { min: 0,    task: "Mug People" },
-
-      { min: 200,  task: "Deal Drugs" },
-
-      { min: 400,  task: "Strongarm Civilians" },
-
-      { min: 600,  task: "Run a Con" },
-
-      { min: 900,  task: "Armed Robbery" },
-
+      { min: 0, task: "Mug People" },
+      { min: 200, task: "Deal Drugs" },
+      { min: 400, task: "Strongarm Civilians" },
+      { min: 600, task: "Run a Con" },
+      { min: 900, task: "Armed Robbery" },
       { min: 1200, task: "Traffick Illegal Arms" },
-
       { min: 1600, task: "Threaten & Blackmail" },
-
       { min: 2200, task: "Human Trafficking" },
-
       { min: 3500, task: "Terrorism" },
-
     ],
 
     // Wanted-headroom caps for respect tiers
-
     respectCapsByPenalty: [
-
-      { minPenalty: 0.9970, capTask: "Traffick Illegal Arms" },
-
+      { minPenalty: 0.997, capTask: "Traffick Illegal Arms" },
       { minPenalty: 0.9985, capTask: "Threaten & Blackmail" },
-
-      { minPenalty: 0.9990, capTask: "Human Trafficking" },
-
+      { minPenalty: 0.999, capTask: "Human Trafficking" },
       { minPenalty: 0.9996, capTask: "Terrorism" },
-
     ],
 
     // Recovery controller
-
-    vigiMinFrac: 0.10,
-
+    vigiMinFrac: 0.1,
     vigiMaxFrac: 0.85,
-
     vigiK: 45,
 
     // NORMAL: be money-forward unless close to the line
-
     normalRespectMin: 0.06,
-
-    normalRespectMax: 0.40,
-
-    normalHeadroomHi: 0.0020,
-
+    normalRespectMax: 0.4,
+    normalHeadroomHi: 0.002,
     normalHeadroomLo: 0.0003,
 
     // Recovery: respect-heavy while recovering
-
     recoveryRespectShare: 0.55,
 
     // Territory / warfare control (AGGRESSIVE-ish)
-
     engageMedianMin: 0.55,
-
     disengageMedianMin: 0.47, // hysteresis
-
     engageAtLeastN: 3,
-
     engageNChanceMin: 0.62,
 
     // Territory assignment fractions (more aggressive)
-
-    territoryMinFrac: 0.70,
-
+    territoryMinFrac: 0.7,
     territoryMaxFrac: 0.95,
-
     territoryFracRampAt: 0.75,
 
     // Territory taper: once you're mostly done, stop over-allocating TW
-
-    territoryTaperAt: 0.95,        // start tapering TW when territory >= 95%
-
-    territoryTaperTo: 0.15,        // TW fraction when territory reaches stopAt (but before endgame shuts it off)
-
-    territoryKeepMin: 2,           // always keep at least N on TW (until endgame)
-
-    territoryKeepMax: 4,           // don't keep more than N when tapering (optional safety)
+    territoryTaperAt: 0.95, // start tapering TW when territory >= 95%
+    territoryTaperTo: 0.15, // TW fraction when territory reaches stopAt (but before endgame shuts it off)
+    territoryKeepMin: 2, // always keep at least N on TW (until endgame)
+    territoryKeepMax: 4, // don't keep more than N when tapering (optional safety)
 
     // Endgame: stop warfare and monetize
-
     territoryStopAt: 0.99,
 
     // Ascension rules
-
     ascendMult: 1.55,
-
     blockAscendWhenEngaged: true,
 
     // Naming
-
     recruitPrefix: "g",
 
     // Logging
-
     logMode: String(flags.logMode),
-
     showRoster: Boolean(flags.showRoster),
 
     // Equipment (baseline)
-
     buyEquip: Boolean(flags.buyEquip),
-
     equipBudget: Number(flags.equipBudget),
-
     equipMinCash: Number(flags.equipMinCash),
-
     equipMaxPurchasesPerTick: 3,
-
     equipMaxSpendPerMin: 1e9,
 
     // --- Equipment catch-up mode ---
-
     equipCatchup: true,
 
     // Enter catch-up if territory squad is under-geared OR anyone is under-geared
-
-    equipCatchupTerritoryMinPct: 0.90,
-
-    equipCatchupAnyMinPct: 0.50,
+    equipCatchupTerritoryMinPct: 0.9,
+    equipCatchupAnyMinPct: 0.5,
 
     // Catch-up overrides (temporary)
-
     equipCatchupMaxPurchasesPerTick: 5,
-
     equipCatchupMaxSpendPerMin: 10_000e6, // $10b/min during catch-up
-
     equipCatchupMinCash: 20e6,
 
     // Exit catch-up (hysteresis)
-
     equipCatchupExitTerritoryMinPct: 0.97,
-
-    equipCatchupExitAnyMinPct: 0.80,
+    equipCatchupExitAnyMinPct: 0.8,
 
     // --- Cash farming mode (NEW) ---
-
     // If in catch-up and we can't afford the next missing combat item while keeping a reserve,
-
     // pause Territory Warfare tasks to rebuild cash.
-
     cashFarm: true,
 
     // Always keep this much cash (prevents feeling broke / starving other scripts)
-
     cashFarmReserve: 8e9,
 
     // Hysteresis around affordability to avoid flapping
-
     cashFarmEnterBuffer: 0.0,
-
     cashFarmExitBuffer: 2e9,
 
     // While cash-farming:
-
-    cashFarmTerritoryFrac: 0.0,   // assign zero TW tasks
-
-    cashFarmRespectShare: 0.02,   // minimize respect tasks, maximize money
+    cashFarmTerritoryFrac: 0.0, // assign zero TW tasks
+    cashFarmRespectShare: 0.02, // minimize respect tasks, maximize money
 
     // Also force "clashes engaged" off while cash-farming (safer)
-
     cashFarmDisableClashes: true,
 
     // Debug
-
     equipDebug: Boolean(flags.equipDebug),
-
   };
 
   /** @type {Map<string, {task: string, tier: string}>} */
-
   const lastMemberState = new Map();
-
   let lastSummary = "";
 
   // Latches
-
   let recovery = false;
-
   let engaged = false;
 
   // Equipment catch-up latch
-
   let equipCatchup = false;
 
   // Cash farming latch
-
   let cashFarm = false;
 
   // Equipment state
-
   let equipState = {
-
     cursor: 0,
-
     spendWindowStart: 0,
-
     spentThisWindow: 0,
-
   };
 
   while (true) {
-
     try {
-
       const g = ns.gang.getGangInformation();
 
       // Recruit
-
       const recruited = recruitAll(ns, cfg.recruitPrefix);
-
       for (const name of recruited) log(ns, cfg, `[gang] recruited ${name}`);
 
       const names = ns.gang.getMemberNames();
 
       // Compute dynamic training target based on your gang's current strength
-
       const dyn = computeDynamicTrainingTarget(ns, cfg, names);
 
       // Clash chance stats (median, count above threshold)
-
       const clash = getClashStats(ns, cfg);
 
       // Recovery latch
-
       if (!recovery) {
-
         if (g.wantedPenalty < cfg.targetPenalty) recovery = true;
-
       } else {
-
-        if (g.wantedPenalty >= (cfg.targetPenalty + cfg.penaltyBuffer)) recovery = false;
-
+        if (g.wantedPenalty >= cfg.targetPenalty + cfg.penaltyBuffer) recovery = false;
       }
 
       // Endgame: once you basically own territory, stop warfare permanently
-
       const inEndgame = g.territory >= cfg.territoryStopAt;
 
       const penaltyGap = Math.max(0, cfg.targetPenalty - g.wantedPenalty);
-
       const headroom = Math.max(0, g.wantedPenalty - cfg.targetPenalty);
 
       // Vigilante fraction during recovery
-
       let vigiFrac = 0;
-
       if (recovery) {
-
         vigiFrac = clamp(cfg.vigiMinFrac, cfg.vigiMinFrac + penaltyGap * cfg.vigiK, cfg.vigiMaxFrac);
-
       }
 
       // Respect share (base)
-
       let respectShare = cfg.normalRespectMin;
-
       if (recovery) {
-
         respectShare = cfg.recoveryRespectShare;
-
       } else {
-
-        const denom = (cfg.normalHeadroomHi - cfg.normalHeadroomLo);
-
+        const denom = cfg.normalHeadroomHi - cfg.normalHeadroomLo;
         const t = denom <= 0 ? 0 : clamp01((cfg.normalHeadroomHi - headroom) / denom);
-
         respectShare = lerp(cfg.normalRespectMin, cfg.normalRespectMax, t);
-
       }
 
       // Territory fraction (base): ramp based on median chance
-
-      let territoryFracBase = (inEndgame || recovery)
-
-        ? 0
-
-        : ramp(
-
-            clash.median,
-
-            cfg.engageMedianMin,
-
-            cfg.territoryFracRampAt,
-
-            cfg.territoryMinFrac,
-
-            cfg.territoryMaxFrac
-
-          );
+      let territoryFracBase =
+        inEndgame || recovery
+          ? 0
+          : ramp(
+              clash.median,
+              cfg.engageMedianMin,
+              cfg.territoryFracRampAt,
+              cfg.territoryMinFrac,
+              cfg.territoryMaxFrac
+            );
 
       // If we're near-capped on territory, taper TW fraction down toward territoryTaperTo
-
       if (!inEndgame && !recovery && g.territory >= cfg.territoryTaperAt) {
-
         const t = clamp01((g.territory - cfg.territoryTaperAt) / (cfg.territoryStopAt - cfg.territoryTaperAt));
-
         const tapered = lerp(territoryFracBase, cfg.territoryTaperTo, t);
-
         territoryFracBase = Math.min(territoryFracBase, tapered);
-
       }
 
       // --- PRELIM decision (used to evaluate gear + next-cost) ---
-
       const prelimDecision = assignCombatTasksAndTiers(ns, names, cfg, {
-
         recovery,
-
         vigiFrac,
-
         respectShare,
-
         territoryFrac: territoryFracBase,
-
         minTrain: dyn.minTrain,
-
         wantedPenalty: g.wantedPenalty,
-
       });
 
       // --- Equipment catch-up mode ---
-
       const catchupInfo = computeEquipCatchup(ns, prelimDecision, cfg);
-
       equipCatchup = updateCatchupLatch(equipCatchup, catchupInfo, cfg);
 
       // --- Cash farming mode (NEW) ---
-
       const cash = ns.getServerMoneyAvailable("home");
-
       const nextTerrCost = getNextMissingCombatEquipCost(ns, prelimDecision.roster.TERRITORY);
-
       const nextAnyCost = getNextMissingCombatEquipCost(ns, ns.gang.getMemberNames());
-
       const nextCost = Math.min(nextTerrCost, nextAnyCost);
 
       if (!cfg.cashFarm || recovery || inEndgame) {
-
         cashFarm = false;
-
       } else if (!cashFarm) {
-
         // ENTER: in catch-up + can't afford next item while maintaining reserve
-
         const need = cfg.cashFarmReserve + nextCost + (cfg.cashFarmEnterBuffer || 0);
-
         if (equipCatchup && Number.isFinite(nextCost) && cash < need) cashFarm = true;
-
       } else {
-
         // EXIT: require extra headroom
-
         const need = cfg.cashFarmReserve + nextCost + (cfg.cashFarmExitBuffer || 0);
-
         if (!equipCatchup || !Number.isFinite(nextCost) || cash >= need) cashFarm = false;
-
       }
 
       // Apply overrides when cash-farming
-
       const finalRespectShare = cashFarm ? cfg.cashFarmRespectShare : respectShare;
-
       const finalTerritoryFrac = cashFarm ? cfg.cashFarmTerritoryFrac : territoryFracBase;
 
       // --- FINAL decision (after cashFarm overrides) ---
-
       const decision = assignCombatTasksAndTiers(ns, names, cfg, {
-
         recovery,
-
         vigiFrac,
-
         respectShare: finalRespectShare,
-
         territoryFrac: finalTerritoryFrac,
-
         minTrain: dyn.minTrain,
-
         wantedPenalty: g.wantedPenalty,
-
       });
 
       // Engage/disengage logic (more aggressive than "worst chance")
-
       // ALSO: never engage while inEndgame, recovery, or cashFarm (if configured).
-
       if (inEndgame || recovery || (cashFarm && cfg.cashFarmDisableClashes)) {
-
         engaged = false;
-
       } else {
-
         const engageOK =
-
-          (clash.median >= cfg.engageMedianMin) ||
-
-          (clash.countGteNChanceMin >= cfg.engageAtLeastN);
-
-        const disengageBad = (clash.median < cfg.disengageMedianMin);
+          clash.median >= cfg.engageMedianMin || clash.countGteNChanceMin >= cfg.engageAtLeastN;
+        const disengageBad = clash.median < cfg.disengageMedianMin;
 
         if (!engaged && engageOK) engaged = true;
-
         if (engaged && disengageBad) engaged = false;
-
       }
 
       if (g.territoryWarfareEngaged !== engaged) {
-
         ns.gang.setTerritoryWarfare(engaged);
-
         log(
-
           ns,
-
           cfg,
-
           `[gang] warfare ${engaged ? "ENABLED" : "disabled"} ` +
-
-          `(median=${(clash.median * 100).toFixed(1)}%, gte${Math.round(cfg.engageNChanceMin * 100)}=${clash.countGteNChanceMin})`
-
+            `(median=${(clash.median * 100).toFixed(1)}%, gte${Math.round(cfg.engageNChanceMin * 100)}=${clash.countGteNChanceMin})`
         );
-
       }
 
       // Ascension (block while engaged if configured)
-
       if (!(cfg.blockAscendWhenEngaged && engaged)) {
-
         const ascended = maybeAscendCombat(ns, names, cfg.ascendMult);
-
         for (const { name, best } of ascended) {
-
           log(ns, cfg, `[gang] ascended ${name} (best mult gain ~${best.toFixed(2)})`);
-
         }
-
       }
 
       // Equipment buying (catch-up overrides)
-
       equipState = buyEquipmentForGangRoundRobin(ns, decision, cfg, equipState, equipCatchup);
 
       // Log member changes
-
       const changes = diffMemberState(decision.memberStates, lastMemberState);
-
       for (const line of changes) log(ns, cfg, line);
 
       // Summary
-
       const g2 = ns.gang.getGangInformation();
-
       const summary =
-
         `[gang] mode=${decision.mode}${cashFarm ? "+CASH" : ""} ` +
-
         `TRAINEE=${decision.counts.TRAINEE} ` +
-
         `TERRITORY=${decision.counts.TERRITORY} ` +
-
         `EARNER=${decision.counts.EARNER} ` +
-
         `VIGILANTE=${decision.counts.VIGILANTE} ` +
-
         `| medianClash=${(clash.median * 100).toFixed(1)}% gte${Math.round(cfg.engageNChanceMin * 100)}=${clash.countGteNChanceMin} engaged=${engaged ? "Y" : "N"} ` +
-
         `| wantedPenalty=${(g2.wantedPenalty * 100).toFixed(2)}% wanted=${g2.wantedLevel.toFixed(0)} ` +
-
         `| minTrain=${dyn.minTrain} ` +
-
         `| equipCatchup=${equipCatchup ? "Y" : "N"} terrMin=${(catchupInfo.terrMinPct * 100).toFixed(1)}% anyMin=${(catchupInfo.anyMinPct * 100).toFixed(1)}% ` +
-
         `| cash=$${(cash / 1e9).toFixed(2)}b next=$${Number.isFinite(nextCost) ? (nextCost / 1e9).toFixed(2) : "n/a"}b reserve=$${(cfg.cashFarmReserve / 1e9).toFixed(1)}b ` +
-
         `| power=${g2.power.toFixed(2)} territory=${(g2.territory * 100).toFixed(2)}%` +
-
         (inEndgame ? " [ENDGAME]" : "");
 
       if (cfg.logMode === "always") {
-
         ns.print(summary);
-
       } else if (cfg.logMode === "changes") {
-
         if (summary !== lastSummary) ns.print(summary);
-
       }
 
       lastSummary = summary;
 
       if (cfg.showRoster && (cfg.logMode === "always" || changes.length > 0)) {
-
         printRoster(ns, decision);
-
       }
-
     } catch (err) {
-
       ns.print(`ERROR: ${String(err)}`);
-
     }
 
     await ns.sleep(cfg.tick);
-
   }
-
 }
 
 /** Recruit using prefix g01, g02... without touching existing names. Returns list of new names. */
-
 function recruitAll(ns, prefix) {
-
   const recruited = [];
-
   const existing = new Set(ns.gang.getMemberNames());
-
   let i = 1;
 
   const nextName = () => {
-
     while (true) {
-
       const name = `${prefix}${String(i).padStart(2, "0")}`;
-
       i++;
-
       if (!existing.has(name)) return name;
-
     }
-
   };
 
   while (ns.gang.canRecruitMember()) {
-
     const name = nextName();
-
     if (!ns.gang.recruitMember(name)) break;
-
     existing.add(name);
-
     recruited.push(name);
-
   }
 
   return recruited;
-
 }
 
 /**
-
  * Ascend if *combat* multiplier gain is big enough.
-
  * Returns list of ascended {name, best}.
-
  */
-
 function maybeAscendCombat(ns, names, ascendMult) {
-
   const ascended = [];
 
   for (const n of names) {
-
     const asc = ns.gang.getAscensionResult(n);
-
     if (!asc) continue;
 
     const best = Math.max(asc.str ?? 1, asc.def ?? 1, asc.dex ?? 1, asc.agi ?? 1);
-
     if (best >= ascendMult) {
-
       ns.gang.ascendMember(n);
-
       ascended.push({ name: n, best });
-
     }
-
   }
 
   return ascended;
-
 }
 
 /**
-
  * Dynamic training target: keep recruits "catching up" as your gang grows.
-
  * Uses median of members' minCombat and takes ~35% of that, bounded.
-
  */
-
 function computeDynamicTrainingTarget(ns, cfg, names) {
-
   if (!names.length) return { minTrain: cfg.minTrainBase };
 
-  const mins = names.map(n => {
-
-    const m = ns.gang.getMemberInformation(n);
-
-    return Math.min(m.str, m.def, m.dex, m.agi);
-
-  }).sort((a, b) => a - b);
+  const mins = names
+    .map((n) => {
+      const m = ns.gang.getMemberInformation(n);
+      return Math.min(m.str, m.def, m.dex, m.agi);
+    })
+    .sort((a, b) => a - b);
 
   const med = mins[Math.floor(mins.length / 2)] ?? 0;
-
   const scaled = Math.floor(med * 0.35);
-
   const minTrain = clamp(cfg.minTrainBase, scaled, cfg.minTrainCap);
 
   return { minTrain };
-
 }
 
 /**
-
  * Respect picker with wantedPenalty caps:
-
  * - Choose highest tier by minCombat
-
  * - Then cap to an allowed maximum tier based on current wantedPenalty
-
  */
-
 function pickRespectTaskCapped(cfg, minCombat, wantedPenalty) {
-
   const tiers = cfg.respectTiers || [];
-
   let chosen = tiers.length ? tiers[0].task : "Mug People";
 
   for (const t of tiers) {
-
     if (minCombat >= t.min) chosen = t.task;
-
     else break;
-
   }
 
   // Determine capTask based on wantedPenalty (pick the highest cap we qualify for)
-
   let capTask = tiers.length ? tiers[0].task : "Mug People";
-
   const caps = cfg.respectCapsByPenalty || [];
 
   for (const c of caps) {
-
     if (wantedPenalty >= c.minPenalty) capTask = c.capTask;
-
   }
 
   // Enforce cap by tier order
-
   const order = new Map(tiers.map((t, i) => [t.task, i]));
-
   const chosenIdx = order.get(chosen) ?? 0;
-
   const capIdx = order.get(capTask) ?? 0;
-
   const finalIdx = Math.min(chosenIdx, capIdx);
 
   return tiers[finalIdx]?.task ?? chosen;
-
 }
 
 /**
-
  * Adaptive assignment:
-
  * - trainees train (hysteresis; dynamic minTrain)
-
  * - if recovery: assign some vigilantes (WEAKEST first)
-
  * - territory: strongest slice -> Territory Warfare (aggressive ramp)
-
  * - earners: remaining -> money, and weakest subset -> respect (auto-tiered + wanted-capped)
-
  */
-
 function assignCombatTasksAndTiers(ns, names, cfg, control) {
-
   const members = names.map((name) => {
-
     const m = ns.gang.getMemberInformation(name);
-
     const minCombat = Math.min(m.str, m.def, m.dex, m.agi);
-
     const power = m.str + m.def + m.dex + m.agi;
-
     return { name, minCombat, power };
-
   });
 
-  const minCombatByName = new Map(members.map(m => [m.name, m.minCombat]));
-
+  const minCombatByName = new Map(members.map((m) => [m.name, m.minCombat]));
   const strongestFirst = [...members].sort((a, b) => b.power - a.power);
-
   const weakestFirst = [...members].sort((a, b) => a.power - b.power);
 
   /** @type {Map<string, {task: string, tier: string}>} */
-
   const memberStates = new Map();
 
   const counts = { TRAINEE: 0, TERRITORY: 0, EARNER: 0, VIGILANTE: 0 };
-
   const roster = { TRAINEE: [], TERRITORY: [], EARNER: [], VIGILANTE: [] };
 
   // Training hysteresis thresholds
-
   const trainOn = control.minTrain;
-
   const trainOff = control.minTrain + cfg.trainHysteresis;
 
   const trainees = new Set();
-
   for (const { name, minCombat } of weakestFirst) {
-
     const currentTask = ns.gang.getMemberInformation(name).task;
-
     const isTrainingNow = currentTask === cfg.trainTask;
-
-    const shouldTrain = isTrainingNow ? (minCombat < trainOff) : (minCombat < trainOn);
-
+    const shouldTrain = isTrainingNow ? minCombat < trainOff : minCombat < trainOn;
     if (shouldTrain) trainees.add(name);
-
   }
 
   for (const n of trainees) {
-
     setTask(ns, n, cfg.trainTask);
-
     memberStates.set(n, { task: cfg.trainTask, tier: "TRAINEE" });
-
     counts.TRAINEE++;
-
     roster.TRAINEE.push(n);
-
   }
 
   const pool = strongestFirst.filter(({ name }) => !trainees.has(name));
 
   // Vigilantes from WEAKEST of pool
-
   let vigiNeeded = 0;
-
   if (control.recovery) {
-
     vigiNeeded = Math.floor(pool.length * control.vigiFrac);
-
     vigiNeeded = Math.max(0, Math.min(pool.length, vigiNeeded));
-
   }
 
   const poolWeakestFirst = [...pool].sort((a, b) => a.power - b.power);
-
-  const vigilantes = new Set(poolWeakestFirst.slice(0, vigiNeeded).map(x => x.name));
+  const vigilantes = new Set(poolWeakestFirst.slice(0, vigiNeeded).map((x) => x.name));
 
   for (const n of vigilantes) {
-
     setTask(ns, n, cfg.vigilanteTask);
-
     memberStates.set(n, { task: cfg.vigilanteTask, tier: "VIGILANTE" });
-
     counts.VIGILANTE++;
-
     roster.VIGILANTE.push(n);
-
   }
 
-  const afterVigi = pool.filter(x => !vigilantes.has(x.name)); // strongest-first
+  const afterVigi = pool.filter((x) => !vigilantes.has(x.name)); // strongest-first
 
   // Territory assignment: strongest slice
-
   let territoryCount = Math.max(0, Math.floor(afterVigi.length * (control.territoryFrac ?? 0)));
 
   // Keep a small TW squad while we're still fighting for the last few %
-
   if (!control.recovery && (control.territoryFrac ?? 0) > 0) {
-
     territoryCount = Math.max(territoryCount, cfg.territoryKeepMin);
-
     territoryCount = Math.min(territoryCount, cfg.territoryKeepMax ?? territoryCount);
-
   }
 
-  // Also don't exceed available 
-
+  // Also don't exceed available
   territoryCount = Math.min(territoryCount, afterVigi.length);
 
-  const territorySet = new Set(afterVigi.slice(0, territoryCount).map(x => x.name));
+  const territorySet = new Set(afterVigi.slice(0, territoryCount).map((x) => x.name));
 
   for (const { name } of afterVigi) {
-
     if (territorySet.has(name)) {
-
       setTask(ns, name, cfg.territoryTask);
-
       memberStates.set(name, { task: cfg.territoryTask, tier: "TERRITORY" });
-
       counts.TERRITORY++;
-
       roster.TERRITORY.push(name);
-
     }
-
   }
 
-  const earners = afterVigi.filter(x => !territorySet.has(x.name));
-
+  const earners = afterVigi.filter((x) => !territorySet.has(x.name));
   const respectCount = Math.max(0, Math.floor(earners.length * control.respectShare));
-
   const earnersWeakestFirst = [...earners].sort((a, b) => a.power - b.power);
-
-  const respectSet = new Set(earnersWeakestFirst.slice(0, respectCount).map(x => x.name));
+  const respectSet = new Set(earnersWeakestFirst.slice(0, respectCount).map((x) => x.name));
 
   for (const { name } of earners) {
-
     let task = cfg.moneyTask;
 
     if (respectSet.has(name)) {
-
       const minCombat = minCombatByName.get(name) ?? 0;
-
       task = pickRespectTaskCapped(cfg, minCombat, control.wantedPenalty ?? 1);
-
     }
 
     setTask(ns, name, task);
-
     memberStates.set(name, { task, tier: "EARNER" });
-
     counts.EARNER++;
-
     roster.EARNER.push(name);
-
   }
 
   roster.TRAINEE.sort((a, b) => a.localeCompare(b));
-
   roster.TERRITORY.sort((a, b) => a.localeCompare(b));
-
   roster.EARNER.sort((a, b) => a.localeCompare(b));
-
   roster.VIGILANTE.sort((a, b) => a.localeCompare(b));
 
   const mode = control.recovery
-
     ? `RECOVERY(v=${counts.VIGILANTE},rs=${control.respectShare.toFixed(2)})`
-
     : `NORMAL(tw=${counts.TERRITORY},rs=${control.respectShare.toFixed(2)})`;
 
   return { memberStates, counts, roster, mode };
-
 }
 
 function setTask(ns, memberName, taskName) {
-
   const m = ns.gang.getMemberInformation(memberName);
-
   if (m.task === taskName) return;
-
   ns.gang.setMemberTask(memberName, taskName);
-
 }
 
 /**
-
  * Returns clash stats across gangs:
-
  * - median chance
-
  * - count of gangs >= cfg.engageNChanceMin
-
  */
-
 function getClashStats(ns, cfg) {
-
   const others = ns.gang.getOtherGangInformation();
-
   const chances = [];
 
   for (const name of Object.keys(others)) {
-
     const c = ns.gang.getChanceToWinClash(name);
-
     if (Number.isFinite(c)) chances.push(c);
-
   }
 
   chances.sort((a, b) => a - b);
 
-  const median = chances.length
-
-    ? chances[Math.floor(chances.length / 2)]
-
-    : 0;
-
-  const countGteNChanceMin = chances.filter(c => c >= cfg.engageNChanceMin).length;
+  const median = chances.length ? chances[Math.floor(chances.length / 2)] : 0;
+  const countGteNChanceMin = chances.filter((c) => c >= cfg.engageNChanceMin).length;
 
   return { median, countGteNChanceMin, n: chances.length };
-
 }
 
 /**
-
  * Compute per-member combat-gear coverage for:
-
  * - TERRITORY members (min coverage)
-
  * - all members (min coverage)
-
  *
-
  * Coverage is based on items that provide STR/DEF/DEX/AGI stats.
-
  */
-
 function computeEquipCatchup(ns, decision, cfg) {
-
   if (!cfg.buyEquip || !cfg.equipCatchup) {
-
     return { terrMinPct: 1, anyMinPct: 1, totalCombatEquip: 0 };
-
   }
 
-  const equip = ns.gang.getEquipmentNames()
-
-    .map(name => ({
-
+  const equip = ns.gang
+    .getEquipmentNames()
+    .map((name) => ({
       name,
-
       stats: ns.gang.getEquipmentStats(name) || {},
-
     }))
-
-    .filter(e =>
-
-      (e.stats.str || 0) > 0 ||
-
-      (e.stats.def || 0) > 0 ||
-
-      (e.stats.dex || 0) > 0 ||
-
-      (e.stats.agi || 0) > 0
-
+    .filter(
+      (e) =>
+        (e.stats.str || 0) > 0 ||
+        (e.stats.def || 0) > 0 ||
+        (e.stats.dex || 0) > 0 ||
+        (e.stats.agi || 0) > 0
     );
 
   const total = equip.length;
-
   if (total <= 0) return { terrMinPct: 1, anyMinPct: 1, totalCombatEquip: 0 };
 
   const pctFor = (member) => {
-
     const info = ns.gang.getMemberInformation(member);
-
     const owned = new Set([...(info.upgrades || []), ...(info.augmentations || [])]);
 
     let have = 0;
-
     for (const e of equip) if (owned.has(e.name)) have++;
-
     return have / total;
-
   };
 
   const allNames = ns.gang.getMemberNames();
-
   const terrNames = decision?.roster?.TERRITORY || [];
 
   let anyMin = 1;
-
   for (const n of allNames) anyMin = Math.min(anyMin, pctFor(n));
 
   let terrMin = 1;
-
   if (terrNames.length > 0) {
-
     for (const n of terrNames) terrMin = Math.min(terrMin, pctFor(n));
-
   }
 
   return { terrMinPct: terrMin, anyMinPct: anyMin, totalCombatEquip: total };
-
 }
 
 /**
-
  * Latch for catch-up mode:
-
  * - Enter if under thresholds
-
  * - Exit only after higher exit thresholds to avoid flapping
-
  */
-
 function updateCatchupLatch(current, info, cfg) {
-
   if (!cfg.equipCatchup) return false;
 
   if (!current) {
-
     const enter =
-
-      info.terrMinPct < cfg.equipCatchupTerritoryMinPct ||
-
-      info.anyMinPct < cfg.equipCatchupAnyMinPct;
-
+      info.terrMinPct < cfg.equipCatchupTerritoryMinPct || info.anyMinPct < cfg.equipCatchupAnyMinPct;
     return enter;
-
-  } else {
-
-    const exit =
-
-      info.terrMinPct >= cfg.equipCatchupExitTerritoryMinPct &&
-
-      info.anyMinPct >= cfg.equipCatchupExitAnyMinPct;
-
-    return !exit;
-
   }
 
+  const exit =
+    info.terrMinPct >= cfg.equipCatchupExitTerritoryMinPct &&
+    info.anyMinPct >= cfg.equipCatchupExitAnyMinPct;
+
+  return !exit;
 }
 
 /**
-
  * Returns the cheapest missing combat-stat equipment cost for a given list of members.
-
  * If everyone in the list is fully covered, returns Infinity.
-
  */
-
 function getNextMissingCombatEquipCost(ns, members) {
-
-  const equip = ns.gang.getEquipmentNames()
-
-    .map(name => ({
-
+  const equip = ns.gang
+    .getEquipmentNames()
+    .map((name) => ({
       name,
-
       cost: ns.gang.getEquipmentCost(name),
-
       stats: ns.gang.getEquipmentStats(name) || {},
-
     }))
-
-    .filter(e => e.cost > 0)
-
-    .filter(e =>
-
-      (e.stats.str || 0) > 0 ||
-
-      (e.stats.def || 0) > 0 ||
-
-      (e.stats.dex || 0) > 0 ||
-
-      (e.stats.agi || 0) > 0
-
+    .filter((e) => e.cost > 0)
+    .filter(
+      (e) =>
+        (e.stats.str || 0) > 0 ||
+        (e.stats.def || 0) > 0 ||
+        (e.stats.dex || 0) > 0 ||
+        (e.stats.agi || 0) > 0
     )
-
     .sort((a, b) => a.cost - b.cost); // cheapest-first
 
   if (!equip.length || !members.length) return Infinity;
 
   let best = Infinity;
-
   for (const member of members) {
-
     const info = ns.gang.getMemberInformation(member);
-
     const owned = new Set([...(info.upgrades || []), ...(info.augmentations || [])]);
-
-    const next = equip.find(e => !owned.has(e.name));
-
+    const next = equip.find((e) => !owned.has(e.name));
     if (next) best = Math.min(best, next.cost);
-
   }
 
   return best;
-
 }
 
 /**
-
  * Equipment buying: fair + paced (round-robin across members) + spend-per-minute governor.
-
  * Catch-up mode temporarily increases buying speed and relaxes minCash.
-
  * Returns updated state object.
-
  */
-
 function buyEquipmentForGangRoundRobin(ns, decision, cfg, state, catchupMode) {
-
   if (!cfg.buyEquip) return state;
 
   // Apply catch-up overrides (temporary, auto-managed)
-
   const maxPurchasesPerTick = catchupMode ? cfg.equipCatchupMaxPurchasesPerTick : cfg.equipMaxPurchasesPerTick;
-
   const maxSpendPerMin = catchupMode ? cfg.equipCatchupMaxSpendPerMin : cfg.equipMaxSpendPerMin;
-
   const minCash = catchupMode ? cfg.equipCatchupMinCash : cfg.equipMinCash;
 
   const now = Date.now();
-
   if (state.spendWindowStart === 0) state.spendWindowStart = now;
 
   // reset spend window every 60s
-
   if (now - state.spendWindowStart >= 60_000) {
-
     state.spendWindowStart = now;
-
     state.spentThisWindow = 0;
-
   }
 
   const cash = ns.getServerMoneyAvailable("home");
-
   if (cash < minCash) return state;
 
   // Catch-up should never stall on expensive augs; spend-per-minute is the real brake.
-
-  const budgetTick = catchupMode ? cash : (cash * cfg.equipBudget);
+  const budgetTick = catchupMode ? cash : cash * cfg.equipBudget;
 
   // remaining budget in the spend window
-
   const budgetWindow = Math.max(0, maxSpendPerMin - state.spentThisWindow);
-
   const budget = Math.min(budgetTick, budgetWindow);
-
   if (budget <= 0) return state;
 
-  const equip = ns.gang.getEquipmentNames()
-
-    .map(name => ({
-
+  const equip = ns.gang
+    .getEquipmentNames()
+    .map((name) => ({
       name,
-
       cost: ns.gang.getEquipmentCost(name),
-
       stats: ns.gang.getEquipmentStats(name) || {},
-
     }))
-
-    .filter(e => e.cost > 0)
-
-    .filter(e =>
-
-      (e.stats.str || 0) > 0 ||
-
-      (e.stats.def || 0) > 0 ||
-
-      (e.stats.dex || 0) > 0 ||
-
-      (e.stats.agi || 0) > 0
-
+    .filter((e) => e.cost > 0)
+    .filter(
+      (e) =>
+        (e.stats.str || 0) > 0 ||
+        (e.stats.def || 0) > 0 ||
+        (e.stats.dex || 0) > 0 ||
+        (e.stats.agi || 0) > 0
     )
-
     // SIMPLE: cheapest-first
-
     .sort((a, b) => a.cost - b.cost);
 
   // Prioritize TERRITORY first, then VIGILANTE/EARNER
-
-  const targets = [
-
-    ...decision.roster.TERRITORY,
-
-    ...decision.roster.VIGILANTE,
-
-    ...decision.roster.EARNER,
-
-  ];
-
+  const targets = [...decision.roster.TERRITORY, ...decision.roster.VIGILANTE, ...decision.roster.EARNER];
   if (!targets.length || !equip.length) return state;
 
   // Optional debug: show what the cursor member is missing and whether budget can cover it
-
   let debugNext = null;
-
   if (cfg.equipDebug && catchupMode) {
-
     const debugMember = targets[state.cursor % targets.length];
-
     const debugInfo = ns.gang.getMemberInformation(debugMember);
-
     const debugOwned = new Set([...(debugInfo.upgrades || []), ...(debugInfo.augmentations || [])]);
-
-    debugNext = equip.find(e => !debugOwned.has(e.name)) || null;
-
+    debugNext = equip.find((e) => !debugOwned.has(e.name)) || null;
   }
 
   let spent = 0;
-
   let buys = 0;
 
   for (let tries = 0; tries < targets.length && buys < maxPurchasesPerTick; tries++) {
-
     const idx = (state.cursor + tries) % targets.length;
-
     const member = targets[idx];
 
     const info = ns.gang.getMemberInformation(member);
-
     const owned = new Set([...(info.upgrades || []), ...(info.augmentations || [])]);
 
     for (const e of equip) {
-
       if (owned.has(e.name)) continue;
-
       if (spent + e.cost > budget) break;
 
       if (ns.gang.purchaseEquipment(member, e.name)) {
-
         spent += e.cost;
-
         buys += 1;
-
-        ns.print(`[equip] ${catchupMode ? "CATCHUP " : ""}${member} <- ${e.name} ($${Math.round(e.cost).toLocaleString()})`);
-
+        ns.print(
+          `[equip] ${catchupMode ? "CATCHUP " : ""}${member} <- ${e.name} ($${Math.round(e.cost).toLocaleString()})`
+        );
       }
 
       break; // max one buy per member per tick
-
     }
-
   }
 
   if (cfg.equipDebug && catchupMode && buys === 0 && debugNext) {
-
     ns.print(
-
       `[equip-debug] cash=$${Math.round(cash).toLocaleString()} ` +
-
-      `budget=$${Math.round(budget).toLocaleString()} ` +
-
-      `next=${debugNext.name} cost=$${Math.round(debugNext.cost).toLocaleString()}`
-
+        `budget=$${Math.round(budget).toLocaleString()} ` +
+        `next=${debugNext.name} cost=$${Math.round(debugNext.cost).toLocaleString()}`
     );
-
   }
 
   state.spentThisWindow += spent;
-
   state.cursor = (state.cursor + 1) % targets.length;
 
   return state;
-
 }
 
 function diffMemberState(newStates, lastState) {
-
   const lines = [];
 
   for (const [name, now] of newStates.entries()) {
-
     const prev = lastState.get(name);
-
     if (!prev || prev.task !== now.task || prev.tier !== now.tier) {
-
       lines.push(`[gang] ${name} -> ${now.tier} (${now.task})`);
-
       lastState.set(name, { task: now.task, tier: now.tier });
-
     }
-
   }
 
   for (const name of [...lastState.keys()]) {
-
     if (!newStates.has(name)) {
-
       lines.push(`[gang] ${name} removed from roster`);
-
       lastState.delete(name);
-
     }
-
   }
 
   return lines;
-
 }
 
 function printRoster(ns, decision) {
-
   const maxPerLine = 6;
 
   const fmtTier = (tier) => {
-
     const names = decision.roster[tier] || [];
-
     if (!names.length) return `${tier}: (none)`;
 
     const chunks = [];
-
     for (let i = 0; i < names.length; i += maxPerLine) {
-
       chunks.push(names.slice(i, i + maxPerLine).join(", "));
-
     }
 
     return `${tier}: ${chunks.join(" | ")}`;
-
   };
 
   ns.print(fmtTier("TRAINEE"));
-
   ns.print(fmtTier("TERRITORY"));
-
   ns.print(fmtTier("EARNER"));
-
   ns.print(fmtTier("VIGILANTE"));
-
 }
 
 function log(ns, cfg, line) {
-
   if (cfg.logMode === "silent") return;
-
   ns.print(line);
-
 }
 
 function clamp(min, x, max) {
-
   return Math.max(min, Math.min(max, x));
-
 }
 
 function clamp01(x) {
-
   if (Number.isNaN(x)) return 0;
-
   return Math.max(0, Math.min(1, x));
-
 }
 
 function lerp(a, b, t) {
-
   return a + (b - a) * clamp01(t);
-
 }
 
 /**
-
  * Linearly ramps from outMin..outMax as x moves from inMin..inMax, clamped.
-
  */
-
 function ramp(x, inMin, inMax, outMin, outMax) {
-
   if (inMax <= inMin) return outMin;
-
   const t = clamp01((x - inMin) / (inMax - inMin));
-
   return lerp(outMin, outMax, t);
-
 }
 
 /** @param {NS} ns */
-
 function printHelp(ns) {
-
   ns.tprint(`
-
 gang-manager.js
 
 Description:
@@ -3986,51 +3140,32 @@ Description:
   Adaptive COMBAT gang automation (slightly aggressive).
 
   - Maintains wantedPenalty >= 99.5% (recovery latch + proportional vigilantes).
-
   - Dynamic training threshold so recruits keep up as gang strength grows.
-
   - Territory Warfare assignment ramped by MEDIAN clash chance.
-
   - Auto-engages clashes when median chance is decent OR at least N gangs are beatable.
-
   - Auto-upgrades respect tasks by stats, but caps max tier based on wantedPenalty to prevent thrashing.
-
   - Endgame: once territory >= 99%, disables warfare and stops territory tasks to monetize.
-
   - Buys combat equipment with round-robin fairness + spend governor.
-
   - Automatic equipment CATCH-UP mode increases purchases/spend when under-equipped.
-
   - NEW: Cash-farming mode pauses TW tasks during catch-up when you can't afford the next big item.
 
 Usage:
 
   run gang-manager.js [--help] [--tail]
-
     [--tick 2000]
-
     [--logMode changes|always|silent]
-
     [--showRoster true|false]
-
     [--buyEquip true|false]
-
     [--equipBudget 0.03]
-
     [--equipMinCash 1e9]
-
     [--equipDebug true|false]
 
 Notes:
 
   - Catch-up and cash-farming are automatic; watch mode tags in the summary: "+CASH".
-
   - Use --equipDebug to print why purchases are blocked (budget vs next item cost).
-
 `);
-
 }
-
 ```
 /* == END FILE == */
 
@@ -4103,7 +3238,6 @@ export async function main(ns) {
   // Legacy shim: moved to /bin/ui/pserv-status.js
   ns.run("/bin/ui/pserv-status.js", 1, ...ns.args);
 }
-
 ```
 /* == END FILE == */
 
@@ -4122,7 +3256,6 @@ export async function main(ns) {
   // Legacy shim: moved to /bin/ui/asset-ui.js
   ns.run("/bin/ui/asset-ui.js", 1, ...ns.args);
 }
-
 ```
 /* == END FILE == */
 
@@ -4416,895 +3549,570 @@ function printHelp(ns) {
 /** @param {NS} ns */
 
 // ------------------------------------------------
-
 // Network helpers
-
 // ------------------------------------------------
-
 function getAllServers(ns) {
-
   const visited = new Set();
-
   const queue = ["home"];
 
   while (queue.length > 0) {
-
     const host = queue.shift();
-
     if (visited.has(host)) continue;
-
     visited.add(host);
 
     for (const neighbor of ns.scan(host)) {
-
       if (!visited.has(neighbor)) queue.push(neighbor);
-
     }
-
   }
 
   return Array.from(visited);
-
 }
 
 function countPortCrackers(ns) {
-
   const programs = [
-
     "BruteSSH.exe",
-
     "FTPCrack.exe",
-
     "relaySMTP.exe",
-
     "HTTPWorm.exe",
-
     "SQLInject.exe",
-
   ];
 
-  return programs.filter(p => ns.fileExists(p, "home")).length;
-
+  return programs.filter((p) => ns.fileExists(p, "home")).length;
 }
 
 function clamp(x, min, max) {
-
   return Math.min(max, Math.max(min, x));
-
 }
 
 function fmtMoney(ns, value) {
-
   return "$" + ns.formatNumber(value, 2, 1e3);
-
 }
 
 // ------------------------------------------------
-
 // Rooting helpers (FIX: remove botnet/root timing race)
-
 // ------------------------------------------------
-
 function getCrackerFns(ns) {
-
   const fns = [];
 
   if (ns.fileExists("BruteSSH.exe", "home")) fns.push((h) => ns.brutessh(h));
-
   if (ns.fileExists("FTPCrack.exe", "home")) fns.push((h) => ns.ftpcrack(h));
-
   if (ns.fileExists("relaySMTP.exe", "home")) fns.push((h) => ns.relaysmtp(h));
-
   if (ns.fileExists("HTTPWorm.exe", "home")) fns.push((h) => ns.httpworm(h));
-
   if (ns.fileExists("SQLInject.exe", "home")) fns.push((h) => ns.sqlinject(h));
 
   return fns;
-
 }
 
 /**
-
  * Returns true if host is rootable *right now* (by your level + crackers).
-
  */
-
 function isRootableNow(ns, host, crackerCount) {
-
   const s = ns.getServer(host);
 
   if (s.hasAdminRights) return false;
-
   if (host === "home" || host === "darkweb") return false;
-
   if (s.purchasedByPlayer) return false;
 
   const reqHack = s.requiredHackingSkill;
-
   const reqPorts = s.numOpenPortsRequired ?? ns.getServerNumPortsRequired(host);
 
   return reqHack <= ns.getHackingLevel() && reqPorts <= crackerCount;
-
 }
 
 /**
-
  * Attempt to root all servers that are rootable now.
-
  * Returns { rooted, attempted } counts.
-
  */
-
 function rootAllPossible(ns) {
-
   const servers = getAllServers(ns);
-
   const crackerFns = getCrackerFns(ns);
-
   const crackerCount = crackerFns.length;
 
   let attempted = 0;
-
   let rooted = 0;
 
   for (const host of servers) {
-
     if (!isRootableNow(ns, host, crackerCount)) continue;
-
     attempted++;
 
     try {
-
       // Open whatever ports we can (order doesn't matter)
-
       for (const fn of crackerFns) {
-
-        try { fn(host); } catch (_e) { /* ignore */ }
-
+        try {
+          fn(host);
+        } catch (_e) {
+          /* ignore */
+        }
       }
 
-      try { ns.nuke(host); } catch (_e) { /* ignore */ }
+      try {
+        ns.nuke(host);
+      } catch (_e) {
+        /* ignore */
+      }
 
       if (ns.hasRootAccess(host)) rooted++;
-
     } catch (_e) {
-
       // Keep going; some servers can still fail if something weird happens.
-
     }
-
   }
 
   return { rooted, attempted };
-
 }
 
 /**
-
  * Wait until all currently-rootable servers are rooted (or timeout).
-
  * This is the key fix: prevents botnet from racing rooting.
-
  */
-
 async function waitForRootCoverage(ns, opts = {}) {
-
   const timeoutMs = Math.max(1_000, Number(opts.timeoutMs ?? 30_000));
-
   const pollMs = Math.max(100, Number(opts.pollMs ?? 500));
-
   const start = Date.now();
 
   while (true) {
-
     const servers = getAllServers(ns);
-
     const crackerCount = countPortCrackers(ns);
-
     const hackingLevel = ns.getHackingLevel();
 
     let rootableNow = 0;
-
     let rootedNow = 0;
 
     for (const host of servers) {
-
       const s = ns.getServer(host);
 
       if (host === "home" || host === "darkweb") continue;
-
       if (s.purchasedByPlayer) continue;
 
       const reqHack = s.requiredHackingSkill;
-
       const reqPorts = s.numOpenPortsRequired ?? ns.getServerNumPortsRequired(host);
 
       if (reqHack <= hackingLevel && reqPorts <= crackerCount) {
-
         rootableNow++;
-
         if (s.hasAdminRights) rootedNow++;
-
       }
-
     }
 
     // If everything we can root right now is rooted, we're good.
-
     if (rootedNow >= rootableNow) return true;
-
     if (Date.now() - start > timeoutMs) return false;
 
     await ns.sleep(pollMs);
-
   }
-
 }
 
 // ------------------------------------------------
-
 // Formulas.exe helpers (auto-detect + safe fallback)
-
 // ------------------------------------------------
-
 function hasFormulas(ns) {
-
   try {
-
     return (
-
       ns.fileExists("Formulas.exe", "home") &&
-
       ns.formulas &&
-
       ns.formulas.hacking &&
-
       typeof ns.formulas.hacking.hackTime === "function"
-
     );
-
   } catch (_e) {
-
     return false;
-
   }
-
 }
 
 function getHackTimeAndChance(ns, host) {
-
   if (!hasFormulas(ns)) {
-
     return {
-
       tHack: ns.getHackTime(host),
-
       chance: ns.hackAnalyzeChance(host),
-
       usingFormulas: false,
-
     };
-
   }
 
   const player = ns.getPlayer();
-
   const s = ns.getServer(host);
 
   s.hackDifficulty = s.minDifficulty;
-
   s.moneyAvailable = Math.max(1, s.moneyMax || 0);
 
   return {
-
     tHack: ns.formulas.hacking.hackTime(s, player),
-
     chance: ns.formulas.hacking.hackChance(s, player),
-
     usingFormulas: true,
-
   };
-
 }
 
 // ------------------------------------------------
-
 // MONEY/sec SCORING (for main batch target)
-
 // ------------------------------------------------
-
 function getScoredServers(ns, extraExcluded = []) {
-
   const hackingLevel = ns.getHackingLevel();
-
   const servers = getAllServers(ns);
-
   const pservs = new Set(ns.getPurchasedServers());
-
   const portCrackers = countPortCrackers(ns);
 
   const MIN_MONEY_ABS = 1_000_000;
-
   const MIN_HACK_RATIO = 0.02;
 
   const EXCLUDED = new Set([
-
     "home",
-
     "darkweb",
-
     "n00dles",
-
     "foodnstuff",
-
     "sigma-cosmetics",
-
     "joesguns",
-
     "harakiri-sushi",
-
     "hong-fang-tea",
-
     ...extraExcluded,
-
   ]);
 
   const scored = [];
 
   for (const host of servers) {
-
     if (EXCLUDED.has(host)) continue;
-
     if (pservs.has(host)) continue;
 
     const s = ns.getServer(host);
 
-    const reqHack  = s.requiredHackingSkill;
-
+    const reqHack = s.requiredHackingSkill;
     const reqPorts = s.numOpenPortsRequired ?? ns.getServerNumPortsRequired(host);
-
     const maxMoney = s.moneyMax;
-
-    const minSec   = s.minDifficulty || 1;
+    const minSec = s.minDifficulty || 1;
 
     if (reqHack > hackingLevel) continue;
-
     if (reqPorts > portCrackers) continue;
-
     if (!maxMoney || maxMoney < MIN_MONEY_ABS) continue;
 
     const hackRatio = reqHack / Math.max(1, hackingLevel);
-
     if (hackRatio < MIN_HACK_RATIO) continue;
 
     const { tHack, chance } = getHackTimeAndChance(ns, host);
-
     if (!tHack || !isFinite(tHack)) continue;
 
     const moneyPerSec = maxMoney / tHack;
-
     const secPenalty = 1 + (minSec - 1) / 100;
 
     let bandBonus;
-
-    if (hackRatio < 0.2)       bandBonus = 0.7;
-
+    if (hackRatio < 0.2) bandBonus = 0.7;
     else if (hackRatio <= 0.8) bandBonus = 1.0;
-
-    else                       bandBonus = 0.85;
+    else bandBonus = 0.85;
 
     const chanceModifier = 0.5 + 0.5 * clamp(chance, 0, 1);
-
     const score = (moneyPerSec * bandBonus * chanceModifier) / secPenalty;
 
     scored.push({
-
       host,
-
       maxMoney,
-
       minSec,
-
       tHack,
-
       score,
-
       reqHack,
-
       chance,
-
       moneyPerSec,
-
       hackRatio,
-
     });
-
   }
 
   scored.sort((a, b) => b.score - a.score);
-
   return scored;
-
 }
 
 function choosePrimaryTarget(ns) {
-
   const scored = getScoredServers(ns);
 
   if (scored.length === 0) {
-
     ns.tprint("[?] No juicy advanced target found with current filters.");
-
     ns.tprint("   Falling back to n00dles.");
-
     return { target: "n00dles", scored: [] };
-
   }
 
   const best = scored[0];
 
   ns.tprint("=======================================");
-
   ns.tprint("   ðŸ’° Juiciest Advanced Target (v4: tuned money/sec)");
-
   ns.tprint("=======================================");
-
   ns.tprint(`ðŸŽ¯ Host:       ${best.host}`);
-
   ns.tprint(`ðŸ’¸ Max Money:  ${fmtMoney(ns, best.maxMoney)}`);
-
-  ns.tprint(`ðŸ§  Req Hack:   ${best.reqHack} (you: ${ns.getHackingLevel()})`);
-
+  ns.tprint(`ðŸ§  Req Hack:   ${best.reqHack} (you: ${ns.getHackingLevel()})`);
   ns.tprint(`ðŸŽ¯ Chance:     ${(best.chance * 100).toFixed(1)}%`);
-
   ns.tprint(`ðŸ›¡ MinSec:     ${best.minSec.toFixed(2)}`);
-
   ns.tprint(`[TIME] Hack Time:  ${(best.tHack / 1000).toFixed(1)}s`);
-
   ns.tprint(`ðŸ’° Money/sec:  ${fmtMoney(ns, best.moneyPerSec * 1000)}`);
-
   ns.tprint(`ðŸ“ˆ Score:      ${best.score.toExponential(3)}`);
 
   const topN = Math.min(5, scored.length);
 
   ns.tprint("=======================================");
-
   ns.tprint("   ðŸ† Top Candidates (by money/sec)");
-
   ns.tprint("=======================================");
 
   for (let i = 0; i < topN; i++) {
-
     const h = scored[i];
-
     ns.tprint(
-
       `${i + 1}. ${h.host} | ` +
-
-      `Score=${h.score.toExponential(2)} | ` +
-
-      `Money=${fmtMoney(ns, h.maxMoney)} | ` +
-
-      `ReqHack=${h.reqHack} | ` +
-
-      `Chance=${(h.chance * 100).toFixed(1)}% | ` +
-
-      `Sec=${h.minSec.toFixed(1)} | ` +
-
-      `T=${(h.tHack / 1000).toFixed(1)}s | ` +
-
-      `hackRatio=${(h.hackRatio * 100).toFixed(0)}% | ` +
-
-      `$/sec=${fmtMoney(ns, h.moneyPerSec * 1000)}`
-
+        `Score=${h.score.toExponential(2)} | ` +
+        `Money=${fmtMoney(ns, h.maxMoney)} | ` +
+        `ReqHack=${h.reqHack} | ` +
+        `Chance=${(h.chance * 100).toFixed(1)}% | ` +
+        `Sec=${h.minSec.toFixed(1)} | ` +
+        `T=${(h.tHack / 1000).toFixed(1)}s | ` +
+        `hackRatio=${(h.hackRatio * 100).toFixed(0)}% | ` +
+        `$/sec=${fmtMoney(ns, h.moneyPerSec * 1000)}`
     );
-
   }
 
   return { target: best.host, scored };
-
 }
 
 // ------------------------------------------------
-
 // XP SCORING (for HGW farm target - tweaked)
-
 // ------------------------------------------------
-
 function getXpScoredServers(ns, extraExcluded = []) {
-
   const hackingLevel = ns.getHackingLevel();
-
   const servers = getAllServers(ns);
-
   const pservs = new Set(ns.getPurchasedServers());
-
   const portCrackers = countPortCrackers(ns);
 
-  const EXCLUDED = new Set([
-
-    "home",
-
-    "darkweb",
-
-    ...extraExcluded,
-
-  ]);
-
+  const EXCLUDED = new Set(["home", "darkweb", ...extraExcluded]);
   const scored = [];
 
   for (const host of servers) {
-
     if (EXCLUDED.has(host)) continue;
-
     if (pservs.has(host)) continue;
 
     const s = ns.getServer(host);
-
-    const reqHack  = s.requiredHackingSkill;
-
+    const reqHack = s.requiredHackingSkill;
     const reqPorts = s.numOpenPortsRequired ?? ns.getServerNumPortsRequired(host);
 
     if (reqHack > hackingLevel) continue;
-
     if (reqPorts > portCrackers) continue;
 
     const { tHack, chance } = getHackTimeAndChance(ns, host);
-
     if (!tHack || !isFinite(tHack)) continue;
 
     const hackRatio = reqHack / Math.max(1, hackingLevel);
 
     let bandBonus;
-
-    if (hackRatio < 0.4)       bandBonus = 0.5;
-
+    if (hackRatio < 0.4) bandBonus = 0.5;
     else if (hackRatio <= 1.2) bandBonus = 1.1;
-
     else if (hackRatio <= 1.6) bandBonus = 1.0;
-
-    else                       bandBonus = 0.7;
+    else bandBonus = 0.7;
 
     const chanceModifier = 0.5 + 0.5 * clamp(chance, 0, 1);
-
-    const baseXpScore    = (reqHack * chanceModifier) / Math.pow(tHack, 1.2);
-
+    const baseXpScore = (reqHack * chanceModifier) / Math.pow(tHack, 1.2);
     const score = baseXpScore * bandBonus;
 
     scored.push({
-
       host,
-
       score,
-
       reqHack,
-
       chance,
-
       tHack,
-
       hackRatio,
-
     });
-
   }
 
   scored.sort((a, b) => b.score - a.score);
-
   return scored;
-
 }
 
 function chooseXpTarget(ns, primary) {
-
   const scored = getXpScoredServers(ns, [primary]);
 
   if (scored.length === 0) {
-
     ns.tprint("[?] No distinct XP-optimized HGW target found.");
-
     ns.tprint("   Falling back to 'n00dles' as a safe XP farm.");
-
     return "n00dles";
-
   }
 
   const best = scored[0];
 
   ns.tprint("=======================================");
-
-  ns.tprint("   ðŸ§  XP-Optimized HGW Target (tweaked)");
-
+  ns.tprint("   ðŸ§  XP-Optimized HGW Target (tweaked)");
   ns.tprint("=======================================");
-
   ns.tprint(`ðŸŽ¯ Host:       ${best.host}`);
-
-  ns.tprint(`ðŸ§  Req Hack:   ${best.reqHack} (you: ${ns.getHackingLevel()})`);
-
+  ns.tprint(`ðŸ§  Req Hack:   ${best.reqHack} (you: ${ns.getHackingLevel()})`);
   ns.tprint(`ðŸŽ¯ Chance:     ${(best.chance * 100).toFixed(1)}%`);
-
   ns.tprint(`[TIME] Hack Time:  ${(best.tHack / 1000).toFixed(1)}s`);
-
   ns.tprint(`ðŸ“ˆ XP Score:   ${best.score.toExponential(3)}`);
-
   ns.tprint(`hackRatio:     ${(best.hackRatio * 100).toFixed(0)}%`);
 
   const topN = Math.min(5, scored.length);
 
   ns.tprint("=======================================");
-
-  ns.tprint("   ðŸ§  Top XP Candidates");
-
+  ns.tprint("   ðŸ§  Top XP Candidates");
   ns.tprint("=======================================");
 
   for (let i = 0; i < topN; i++) {
-
     const h = scored[i];
-
     ns.tprint(
-
       `${i + 1}. ${h.host} | ` +
-
-      `XPScore=${h.score.toExponential(2)} | ` +
-
-      `ReqHack=${h.reqHack} | ` +
-
-      `Chance=${(h.chance * 100).toFixed(1)}% | ` +
-
-      `T=${(h.tHack / 1000).toFixed(1)}s | ` +
-
-      `hackRatio=${(h.hackRatio * 100).toFixed(0)}%`
-
+        `XPScore=${h.score.toExponential(2)} | ` +
+        `ReqHack=${h.reqHack} | ` +
+        `Chance=${(h.chance * 100).toFixed(1)}% | ` +
+        `T=${(h.tHack / 1000).toFixed(1)}s | ` +
+        `hackRatio=${(h.hackRatio * 100).toFixed(0)}%`
     );
-
   }
 
   return best.host;
-
 }
 
 function chooseSecondaryTarget(ns, primary) {
-
   const scored = getScoredServers(ns, [primary]);
 
   if (scored.length === 0) {
-
     ns.tprint("[?] No distinct secondary target found for HGW; reusing primary.");
-
     return primary;
-
   }
 
   const best = scored[0];
-
   ns.tprint(`ðŸ’° Secondary money target (unused by default): ${best.host}`);
-
   return best.host;
-
 }
 
 // ------------------------------------------------------------
-
 // MAIN (RAM-aware, prioritized launcher)
-
 // ------------------------------------------------------------
-
 export async function main(ns) {
-
   ns.disableLog("ALL");
 
   const formulasAvailable = hasFormulas(ns);
 
   ns.tprint(
-
     formulasAvailable
-
       ? "Formulas.exe detected - using formulas-based times/chance where possible."
-
       : "Formulas.exe not detected - using built-in timing/scoring APIs."
-
   );
 
   const flags = ns.flags([
-
-    ["hgw", "money"],   // "xp" or "money" for HGW mode
-
-    ["extras", ""],     // comma/space separated extras: "pserv", "hacknet", "ui", "all"
-
-    ["help", false],    // show help and exit
-
+    ["hgw", "money"], // "xp" or "money" for HGW mode
+    ["extras", ""], // comma/space separated extras: "pserv", "hacknet", "ui", "all"
+    ["help", false], // show help and exit
   ]);
 
   if (flags.help) {
-
     printHelp(ns);
-
     return;
-
   }
 
   const hgwMode = String(flags.hgw ?? "money").toLowerCase();
-
   const extrasRaw = String(flags.extras || "").toLowerCase();
 
   const extrasTokens = extrasRaw
-
     .split(/[,\s]+/)
-
-    .map(t => t.trim())
-
+    .map((t) => t.trim())
     .filter(Boolean);
 
   const extrasSet = new Set();
 
   for (const token of extrasTokens) {
-
     if (token === "all" || token === "*") {
-
       extrasSet.add("pserv");
-
       extrasSet.add("hacknet");
-
       extrasSet.add("ui");
-
       continue;
-
     }
 
-    if (["pserv", "pservs", "pserver", "pservers"].includes(token)) { extrasSet.add("pserv"); continue; }
+    if (["pserv", "pservs", "pserver", "pservers"].includes(token)) {
+      extrasSet.add("pserv");
+      continue;
+    }
 
-    if (["hacknet", "hn"].includes(token)) { extrasSet.add("hacknet"); continue; }
+    if (["hacknet", "hn"].includes(token)) {
+      extrasSet.add("hacknet");
+      continue;
+    }
 
-    if (["ui", "dashboard", "ops"].includes(token)) { extrasSet.add("ui"); continue; }
-
+    if (["ui", "dashboard", "ops"].includes(token)) {
+      extrasSet.add("ui");
+      continue;
+    }
   }
 
-  const wantPserv   = extrasSet.has("pserv");
-
+  const wantPserv = extrasSet.has("pserv");
   const wantHacknet = extrasSet.has("hacknet");
-
-  const wantUi      = extrasSet.has("ui");
+  const wantUi = extrasSet.has("ui");
 
   const homeMaxRam = ns.getServerMaxRam("home");
-
   const pservs = ns.getPurchasedServers();
 
   let minPservRam = 0;
 
   if (pservs.length > 0) {
-
     minPservRam = Infinity;
-
     for (const host of pservs) {
-
       const r = ns.getServerMaxRam(host);
-
       if (r < minPservRam) minPservRam = r;
-
     }
-
   }
 
   const HOME_RAM_RESERVE = (() => {
-
     const max = homeMaxRam;
-
-    return Math.min(128, Math.max(8, Math.floor(max * 0.10)));
-
+    return Math.min(128, Math.max(8, Math.floor(max * 0.1)));
   })();
 
   const PSERV_TARGET_RAM = (() => {
-
-    if (homeMaxRam < 128)  return 32;
-
-    if (homeMaxRam < 256)  return 64;
-
-    if (homeMaxRam < 512)  return 128;
-
+    if (homeMaxRam < 128) return 32;
+    if (homeMaxRam < 256) return 64;
+    if (homeMaxRam < 512) return 128;
     if (homeMaxRam < 1024) return 256;
-
     if (homeMaxRam < 2048) return 512;
-
     return 1024;
-
   })();
 
-  const USE_LOW_RAM_MODE =
-
-    homeMaxRam < 128 &&
-
-    (pservs.length === 0 || minPservRam < 64);
+  const USE_LOW_RAM_MODE = homeMaxRam < 128 && (pservs.length === 0 || minPservRam < 64);
 
   ns.tprint(
-
     USE_LOW_RAM_MODE
-
-      ? `Low-RAM batch mode ENABLED for timed-net-batcher2.js (home=${homeMaxRam.toFixed(1)}GB, min pserv=${minPservRam || 0}GB).`
-
-      : `Full batch mode (no --lowram) for timed-net-batcher2.js (home=${homeMaxRam.toFixed(1)}GB, min pserv=${minPservRam || 0}GB).`
-
+      ? `Low-RAM batch mode ENABLED for timed-net-batcher2.js (home=${homeMaxRam.toFixed(
+          1
+        )}GB, min pserv=${minPservRam || 0}GB).`
+      : `Full batch mode (no --lowram) for timed-net-batcher2.js (home=${homeMaxRam.toFixed(
+          1
+        )}GB, min pserv=${minPservRam || 0}GB).`
   );
 
   const override = flags._[0] || null;
 
   let batchTarget;
-
   let hgwTarget;
 
   if (override) {
-
     batchTarget = override;
-
     ns.tprint(`STARTUP-HOME: Manual override batch target: ${batchTarget}`);
-
   } else {
-
     const { target: autoTarget } = choosePrimaryTarget(ns);
-
     batchTarget = autoTarget || "n00dles";
-
     ns.tprint(`STARTUP-HOME: Auto-selected batch target: ${batchTarget}`);
-
   }
 
   if (hgwMode === "money") {
-
     ns.tprint("HGW Mode: MONEY");
-
     hgwTarget = chooseSecondaryTarget(ns, batchTarget);
-
   } else {
-
     ns.tprint("HGW Mode: XP");
-
     hgwTarget = chooseXpTarget(ns, batchTarget);
-
   }
 
   ns.tprint(`BATCH TARGET (money):      ${batchTarget}`);
-
   ns.tprint(`HGW TARGET (${hgwMode.toUpperCase()}): ${hgwTarget}`);
 
   // Kill everything on home except:
-
   //  - this startup script
-
   //  - corp/agri-structure.js
-
   //  - corp/agri-inputs.js
-
   //  - corp/agri-sales.js
-
   ns.tprint(
-
     "STARTUP-HOME: Killing all processes on home " +
-
-    "(except startup + corp/agri-structure.js + corp/agri-inputs.js + corp/agri-sales.js)."
-
+      "(except startup + corp/agri-structure.js + corp/agri-inputs.js + corp/agri-sales.js)."
   );
 
   const myPid = ns.pid;
 
-  const keepFiles = new Set([
-
-    "corp/agri-structure.js",
-
-    "corp/agri-inputs.js",
-
-    "corp/agri-sales.js",
-
-  ]);
-
+  const keepFiles = new Set(["corp/agri-structure.js", "corp/agri-inputs.js", "corp/agri-sales.js"]);
   const processes = ns.ps("home");
 
   for (const p of processes) {
-
     if (p.pid === myPid) continue;
-
     if (keepFiles.has(p.filename)) continue;
-
     ns.kill(p.pid);
-
   }
 
   await ns.sleep(200);
@@ -5312,333 +4120,193 @@ export async function main(ns) {
   ns.tprint("Home is clean. Proceeding with rooting + relaunch.");
 
   // --------------------------------------------------
-
   // FIX: root first (so batcher + botnet don't race it)
-
   // --------------------------------------------------
-
   const before = rootAllPossible(ns);
 
   ns.tprint(`ROOT PASS: rooted=${before.rooted}/${before.attempted} newly-rootable targets (attempted).`);
 
   // Optional: if you still want /bin/root-and-deploy.js to do copying/backdoor/etc
-
   // we can start it, but we no longer *depend* on it for initial rooting.
-
   if (ns.fileExists("/bin/root-and-deploy.js", "home")) {
-
     const pid = ns.exec("/bin/root-and-deploy.js", "home", 1);
-
     if (pid === 0) ns.tprint("WARN: Failed to launch /bin/root-and-deploy.js (continuing).");
-
     else ns.tprint(`Started ROOT + DEPLOY daemon (pid ${pid}).`);
-
   } else {
-
     ns.tprint("WARN: /bin/root-and-deploy.js missing; relying on startup rooting pass only.");
-
   }
 
   // Keep trying briefly in case you just bought a cracker / leveled / etc.
-
   const ok = await waitForRootCoverage(ns, { timeoutMs: 20_000, pollMs: 500 });
 
-  if (!ok) {
-
-    ns.tprint("WARN: Root coverage not complete within timeout. Continuing anyway.");
-
-  } else {
-
-    ns.tprint("Root coverage OK: all currently-rootable servers are rooted.");
-
-  }
+  if (!ok) ns.tprint("WARN: Root coverage not complete within timeout. Continuing anyway.");
+  else ns.tprint("Root coverage OK: all currently-rootable servers are rooted.");
 
   // --------------------------------------------------
-
   // RAM-aware scheduler
-
   // --------------------------------------------------
-
   function cost(script, threads = 1) {
-
     if (!ns.fileExists(script, "home")) {
-
       ns.tprint(`Missing script (skipping in plan): ${script}`);
-
       return Infinity;
-
     }
 
     return ns.getScriptRam(script, "home") * threads;
-
   }
 
   const maxRam = homeMaxRam;
-
   const budget = maxRam - HOME_RAM_RESERVE;
-
   let usedPlanned = ns.getServerUsedRam("home");
 
   // 1) Launch MONEY BATCHER (now target should be rooted)
-
   const batcherArgs = USE_LOW_RAM_MODE ? [batchTarget, "--lowram"] : [batchTarget];
-
   const batcherRamCost = cost("/bin/timed-net-batcher2.js", 1);
 
   if (isFinite(batcherRamCost)) {
-
     if (batcherRamCost > maxRam) {
-
       ns.tprint(
-
         "MONEY BATCHER (/bin/timed-net-batcher2.js) alone needs " +
-
-        `${batcherRamCost.toFixed(1)}GB, which exceeds home RAM (${maxRam.toFixed(1)}GB).`
-
+          `${batcherRamCost.toFixed(1)}GB, which exceeds home RAM (${maxRam.toFixed(1)}GB).`
       );
-
     } else {
-
       const pid = ns.exec("/bin/timed-net-batcher2.js", "home", 1, ...batcherArgs);
 
       if (pid === 0) ns.tprint("Failed to launch MONEY BATCHER (/bin/timed-net-batcher2.js).");
-
       else {
-
         usedPlanned = ns.getServerUsedRam("home");
-
         ns.tprint(`Started REQUIRED MONEY BATCHER (pid ${pid}) ${JSON.stringify(batcherArgs)}`);
-
       }
-
     }
-
   }
 
   // 2) Launch BOTNET after rooting is handled (FIX)
-
   // NOTE: This is the big race fix vs your old ordering.
-
   {
-
     const botnetRam = cost("/bin/botnet-hgw-sync.js", 1);
 
     if (isFinite(botnetRam)) {
-
       const futureUsed = usedPlanned + botnetRam;
 
       if (futureUsed > budget) {
-
-        ns.tprint(
-
-          `Skipping BOTNET HGW SYNC - would exceed budget ${futureUsed.toFixed(1)}GB > ${budget.toFixed(1)}GB`
-
-        );
-
+        ns.tprint(`Skipping BOTNET HGW SYNC - would exceed budget ${futureUsed.toFixed(1)}GB > ${budget.toFixed(1)}GB`);
       } else {
-
         const pid = ns.exec("/bin/botnet-hgw-sync.js", "home", 1, hgwTarget, hgwMode);
 
         if (pid === 0) ns.tprint("Failed to launch BOTNET HGW SYNC (/bin/botnet-hgw-sync.js).");
-
         else {
-
           usedPlanned = ns.getServerUsedRam("home");
-
           ns.tprint(`Started BOTNET HGW SYNC (pid ${pid}) [${hgwTarget}, ${hgwMode}]`);
-
         }
-
       }
-
     }
-
   }
 
   // 3) Optional extras
-
   const plan = [];
 
   if (wantPserv) {
-
     plan.push({
-
       name: "/bin/pserv-manager.js",
-
       threads: 1,
-
       args: [PSERV_TARGET_RAM],
-
       label: "PSERV MANAGER",
-
     });
-
   }
 
   if (wantHacknet) {
-
     plan.push({
-
       name: "hacknet/hacknet-smart.js",
-
       threads: 1,
-
       args: [],
-
       label: "HACKNET SMART",
-
     });
-
   }
 
   if (wantUi) {
-
     plan.push({
-
       name: "DISABLED:bin/ui/ops-dashboard.js",
-
       threads: 1,
-
       args: [batchTarget],
-
       label: "OPS DASHBOARD (one-shot)",
-
     });
-
   }
 
   for (const job of plan) {
-
     const jobRam = cost(job.name, job.threads);
-
     if (!isFinite(jobRam)) continue;
 
     const futureUsed = usedPlanned + jobRam;
 
     if (futureUsed > budget) {
-
       ns.tprint(
-
-        `Skipping ${job.label} (${job.name}) - would exceed budget ` +
-
-        `${futureUsed.toFixed(1)}GB > ${budget.toFixed(1)}GB`
-
+        `Skipping ${job.label} (${job.name}) - would exceed budget ` + `${futureUsed.toFixed(1)}GB > ${budget.toFixed(1)}GB`
       );
-
       continue;
-
     }
 
     const pid = ns.exec(job.name, "home", job.threads, ...(job.args || []));
 
     if (pid === 0) ns.tprint(`Failed to launch ${job.label} (${job.name}).`);
-
     else {
-
       usedPlanned = ns.getServerUsedRam("home");
-
       ns.tprint(`Started ${job.label} (pid ${pid}) ${job.args?.length ? JSON.stringify(job.args) : ""}`);
-
     }
-
   }
 
   // Give botnet-hgw-sync time to deploy HGW scripts before showing status
-
   await ns.sleep(5000);
 
   if (ns.fileExists("/botnet/botnet-hgw-status.js", "home")) {
-
     const pid = ns.exec("/botnet/botnet-hgw-status.js", "home", 1);
-
     if (pid === 0) ns.tprint("Failed to launch BOTNET STATUS after deployment delay.");
-
     else ns.tprint(`Started BOTNET STATUS (pid ${pid}) after deployment delay.`);
-
   } else {
-
     ns.tprint("BOTNET STATUS script not found on home.");
-
   }
 
   ns.tprint(
-
     "STARTUP-HOME COMPLETE - automation online. " +
-
-    `Home RAM: ${maxRam.toFixed(1)}GB, reserve: ${HOME_RAM_RESERVE.toFixed(1)}GB.`
-
+      `Home RAM: ${maxRam.toFixed(1)}GB, reserve: ${HOME_RAM_RESERVE.toFixed(1)}GB.`
   );
-
 }
 
 // --------------------------------------------------
-
 // Help Function
-
 // --------------------------------------------------
-
 function printHelp(ns) {
-
   ns.tprint("/bin/startup-home-advanced.js");
-
   ns.tprint("");
 
   ns.tprint("Description");
-
   ns.tprint("  Advanced home startup/launcher.");
-
   ns.tprint("  Picks a batch target, chooses an HGW target for XP or money,");
-
   ns.tprint("  kills existing scripts on home (except itself and corp/agri-* helpers),");
-
   ns.tprint("  ROOTS all currently-rootable servers (fixes ordering/race), then launches:");
-
   ns.tprint("    - /bin/timed-net-batcher2.js");
-
   ns.tprint("    - /bin/botnet-hgw-sync.js");
-
   ns.tprint("  Optionally launches /bin/root-and-deploy.js as a daemon for extra deploy work.");
-
   ns.tprint("  Optional extras via --extras:");
-
   ns.tprint("    - /bin/pserv-manager.js");
-
   ns.tprint("    - hacknet/hacknet-smart.js");
-
   ns.tprint("    - ui/ops-dashboard.js (one-shot dashboard)");
-
   ns.tprint("");
 
   ns.tprint("Notes");
-
   ns.tprint("  - Safe to rerun; it will re-kill and restart your core automation.");
-
   ns.tprint("  - Uses Formulas.exe automatically when present for target scoring.");
-
   ns.tprint("  - Auto-enables timed-net-batcher2 --lowram mode on very small setups.");
-
   ns.tprint("  - Fix: rooting happens before botnet/batcher start to prevent race errors.");
-
   ns.tprint("");
 
   ns.tprint("Syntax");
-
   ns.tprint("  run /bin/startup-home-advanced.js");
-
   ns.tprint("  run /bin/startup-home-advanced.js --extras pserv");
-
   ns.tprint("  run /bin/startup-home-advanced.js --extras pserv,hacknet,ui");
-
   ns.tprint("  run /bin/startup-home-advanced.js --extras all");
-
   ns.tprint("  run /bin/startup-home-advanced.js omega-net");
-
   ns.tprint("  run /bin/startup-home-advanced.js --hgw xp");
-
   ns.tprint("  run /bin/startup-home-advanced.js omega-net --hgw money --extras ui");
-
   ns.tprint("  run /bin/startup-home-advanced.js --help");
-
 }
 
 // ooo fixed
@@ -5648,1260 +4316,756 @@ function printHelp(ns) {
 /* == FILE: bin/timed-net-batcher2.js == */
 ```js
 // Global health thresholds (more relaxed)
-
-const MONEY_THRESHOLD = 0.90;  // Accept 90%+ money in normal mode
-
-const SEC_TOLERANCE   = 0.90;  // Allow some security above min
+const MONEY_THRESHOLD = 0.90; // Accept 90%+ money in normal mode
+const SEC_TOLERANCE = 0.90; // Allow some security above min
 
 // Softer thresholds for low-RAM mode
-
 const LOWRAM_MONEY_THRESHOLD = 0.90; // Accept 90%+ money
-
-const LOWRAM_SEC_TOLERANCE   = 1.50; // Allow more security drift
+const LOWRAM_SEC_TOLERANCE = 1.50; // Allow more security drift
 
 // Interval for status + profit summaries
-
 const STATUS_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
 // Each batch will only try to use this fraction of *currently free* RAM.
-
-const BATCH_RAM_FRACTION = 0.9;  // 90% of free RAM per batch
+const BATCH_RAM_FRACTION = 0.9; // 90% of free RAM per batch
 
 // Target hack fraction per money batch (aggressive, but capped)
-
 const TARGET_HACK_FRACTION = 0.10; // Aim to hack ~10% money per batch
-
-const MAX_HACK_FRACTION    = 0.30; // Never hack more than 30% per batch
+const MAX_HACK_FRACTION = 0.30; // Never hack more than 30% per batch
 
 // Prep behavior
-
 const WEAKEN_FIRST_DELTA = 5; // If secDelta > this, do weaken-only prep
 
 // Hot-reload thresholds
-
-const PSERV_MIN_TOTAL_RAM = 64;      // below this => home-only mode
-
-const FLEET_REFRESH_MS    = 5_000;   // how often to rescan pserv fleet
-
-const FLEET_STABLE_MS     = 8_000;  // hysteresis: must remain above/below threshold this long to switch
+const PSERV_MIN_TOTAL_RAM = 64; // below this => home-only mode
+const FLEET_REFRESH_MS = 5_000; // how often to rescan pserv fleet
+const FLEET_STABLE_MS = 8_000; // hysteresis: must remain above/below threshold this long to switch
 
 // Simple formatter wrapper for money values
-
 function fmtMoney(ns, value) {
-
-    return "$" + ns.formatNumber(value, 2, 1e3);
-
+  return "$" + ns.formatNumber(value, 2, 1e3);
 }
 
 // ------------------------------------------------
-
 // Home RAM reserve helper (shared by both modes)
-
 // ------------------------------------------------
-
 function getHomeReserve(ns) {
-
-    const max = ns.getServerMaxRam("home");
-
-    // 10% of home, clamped between 8GB and 128GB
-
-    return Math.min(128, Math.max(8, Math.floor(max * 0.10)));
-
+  const max = ns.getServerMaxRam("home");
+  // 10% of home, clamped between 8GB and 128GB
+  return Math.min(128, Math.max(8, Math.floor(max * 0.10)));
 }
 
 // ------------------------------------------------
-
 // Formulas.exe helpers
-
 // ------------------------------------------------
-
 function hasFormulas(ns) {
-
-    try {
-
-        return (
-
-            ns.fileExists("Formulas.exe", "home") &&
-
-            ns.formulas &&
-
-            ns.formulas.hacking &&
-
-            typeof ns.formulas.hacking.hackTime === "function"
-
-        );
-
-    } catch (_e) {
-
-        return false;
-
-    }
-
+  try {
+    return (
+      ns.fileExists("Formulas.exe", "home") &&
+      ns.formulas &&
+      ns.formulas.hacking &&
+      typeof ns.formulas.hacking.hackTime === "function"
+    );
+  } catch (_e) {
+    return false;
+  }
 }
 
 /**
-
  * Compute hack/grow/weaken times.
-
  * - assumePrepped=true  => min security + max money
-
  * - assumePrepped=false => CURRENT server state
-
  *
-
  * Uses formulas if available, otherwise falls back to ns.getHack/Grow/WeakenTime.
-
  */
-
 function getHackGrowWeakenTimes(ns, target, assumePrepped = true) {
-
-    if (!hasFormulas(ns)) {
-
-        return {
-
-            tHack: ns.getHackTime(target),
-
-            tGrow: ns.getGrowTime(target),
-
-            tWeaken: ns.getWeakenTime(target),
-
-            usingFormulas: false,
-
-        };
-
-    }
-
-    const player = ns.getPlayer();
-
-    const s = ns.getServer(target);
-
-    if (assumePrepped) {
-
-        s.hackDifficulty = s.minDifficulty;
-
-        s.moneyAvailable = Math.max(1, s.moneyMax || 0);
-
-    } else {
-
-        // Keep current hackDifficulty; ensure moneyAvailable is non-zero
-
-        s.moneyAvailable = Math.max(1, s.moneyAvailable || 0);
-
-    }
-
+  if (!hasFormulas(ns)) {
     return {
-
-        tHack: ns.formulas.hacking.hackTime(s, player),
-
-        tGrow: ns.formulas.hacking.growTime(s, player),
-
-        tWeaken: ns.formulas.hacking.weakenTime(s, player),
-
-        usingFormulas: true,
-
+      tHack: ns.getHackTime(target),
+      tGrow: ns.getGrowTime(target),
+      tWeaken: ns.getWeakenTime(target),
+      usingFormulas: false,
     };
+  }
 
+  const player = ns.getPlayer();
+  const s = ns.getServer(target);
+
+  if (assumePrepped) {
+    s.hackDifficulty = s.minDifficulty;
+    s.moneyAvailable = Math.max(1, s.moneyMax || 0);
+  } else {
+    // Keep current hackDifficulty; ensure moneyAvailable is non-zero
+    s.moneyAvailable = Math.max(1, s.moneyAvailable || 0);
+  }
+
+  return {
+    tHack: ns.formulas.hacking.hackTime(s, player),
+    tGrow: ns.formulas.hacking.growTime(s, player),
+    tWeaken: ns.formulas.hacking.weakenTime(s, player),
+    usingFormulas: true,
+  };
 }
 
 // ------------------------------------------------
-
 // HELP
-
 // ------------------------------------------------
-
 function printHelp(ns) {
+  const script = "bin/timed-net-batcher2.js";
 
-    const script = "bin/timed-net-batcher2.js";
+  ns.tprint("==============================================================");
+  ns.tprint(`HELP - ${script}`);
+  ns.tprint("==============================================================");
+  ns.tprint("");
 
-    ns.tprint("==============================================================");
+  ns.tprint("DESCRIPTION");
+  ns.tprint("  Advanced timed HWGW batch controller that:");
+  ns.tprint("    - Uses Formulas.exe when available for precise timings,");
+  ns.tprint("    - Runs multi-batch pipelines in normal mode,");
+  ns.tprint("    - Falls back to simpler HOME-only HWGW when pserv capacity is low,");
+  ns.tprint("    - HOT-RELOADS purchased server fleet changes (pserv upgrades) without restart.");
+  ns.tprint("");
 
-    ns.tprint(`HELP - ${script}`);
+  ns.tprint("NOTES");
+  ns.tprint("  - Requires batch/batch-hack.js, batch/batch-grow.js, batch/batch-weaken.js on home.");
+  ns.tprint("  - Expects the target to be rooted.");
+  ns.tprint("  - --lowram:");
+  ns.tprint("      * Uses softer money/security thresholds when prepping.");
+  ns.tprint("      * Forces single-batch behavior (no overlap) when applicable.");
+  ns.tprint("  - Hot reload:");
+  ns.tprint("      * Periodically re-scans purchased servers and SCPs workers to new/changed pservs.");
+  ns.tprint("      * Switches between HOME-only and HYBRID mode automatically based on total pserv RAM.");
+  ns.tprint("  - Timing:");
+  ns.tprint("      * During PREP, uses CURRENT-state hack/grow/weaken times.");
+  ns.tprint("      * During MONEY batching, uses PREPPED-state times for tight alignment.");
+  ns.tprint("");
 
-    ns.tprint("==============================================================");
+  ns.tprint("SYNTAX");
+  ns.tprint("  run bin/timed-net-batcher2.js <target>");
+  ns.tprint("  run bin/timed-net-batcher2.js <target> --lowram");
+  ns.tprint("  run bin/timed-net-batcher2.js <target> --concurrency <n>");
+  ns.tprint("  run bin/timed-net-batcher2.js <target> --concurrency 0 --maxconc <n>");
+  ns.tprint("  run bin/timed-net-batcher2.js <target> --debug");
+  ns.tprint("  run bin/timed-net-batcher2.js --help");
+  ns.tprint("");
 
-    ns.tprint("");
-
-    ns.tprint("DESCRIPTION");
-
-    ns.tprint("  Advanced timed HWGW batch controller that:");
-
-    ns.tprint("    - Uses Formulas.exe when available for precise timings,");
-
-    ns.tprint("    - Runs multi-batch pipelines in normal mode,");
-
-    ns.tprint("    - Falls back to simpler HOME-only HWGW when pserv capacity is low,");
-
-    ns.tprint("    - HOT-RELOADS purchased server fleet changes (pserv upgrades) without restart.");
-
-    ns.tprint("");
-
-    ns.tprint("NOTES");
-
-    ns.tprint("  - Requires batch/batch-hack.js, batch/batch-grow.js, batch/batch-weaken.js on home.");
-
-    ns.tprint("  - Expects the target to be rooted.");
-
-    ns.tprint("  - --lowram:");
-
-    ns.tprint("      * Uses softer money/security thresholds when prepping.");
-
-    ns.tprint("      * Forces single-batch behavior (no overlap) when applicable.");
-
-    ns.tprint("  - Hot reload:");
-
-    ns.tprint("      * Periodically re-scans purchased servers and SCPs workers to new/changed pservs.");
-
-    ns.tprint("      * Switches between HOME-only and HYBRID mode automatically based on total pserv RAM.");
-
-    ns.tprint("  - Timing:");
-
-    ns.tprint("      * During PREP, uses CURRENT-state hack/grow/weaken times.");
-
-    ns.tprint("      * During MONEY batching, uses PREPPED-state times for tight alignment.");
-
-    ns.tprint("");
-
-    ns.tprint("SYNTAX");
-
-    ns.tprint("  run bin/timed-net-batcher2.js <target>");
-
-    ns.tprint("  run bin/timed-net-batcher2.js <target> --lowram");
-
-    ns.tprint("  run bin/timed-net-batcher2.js <target> --concurrency <n>");
-
-    ns.tprint("  run bin/timed-net-batcher2.js <target> --concurrency 0 --maxconc <n>");
-
-    ns.tprint("  run bin/timed-net-batcher2.js <target> --debug");
-
-    ns.tprint("  run bin/timed-net-batcher2.js --help");
-
-    ns.tprint("");
-
-    ns.tprint("==============================================================");
-
-    ns.tprint("");
-
+  ns.tprint("==============================================================");
+  ns.tprint("");
 }
 
 // ------------------------------------------------
-
 // MAIN
-
 // ------------------------------------------------
 
 /** @param {NS} ns */
-
 export async function main(ns) {
+  ns.disableLog("ALL");
 
-    ns.disableLog("ALL");
+  const flags = ns.flags([
+    ["lowram", false],
+    ["help", false],
+    ["debug", false],
+    ["concurrency", 0], // 0 = auto (based on available RAM)
+    ["maxconc", 64], // cap for auto/explicit concurrency
+  ]);
 
-    const flags = ns.flags([
+  if (flags.help) {
+    printHelp(ns);
+    return;
+  }
 
-        ["lowram", false],
+  const target = flags._[0];
+  const lowRamMode = !!flags.lowram;
+  const debug = !!flags.debug;
+  const requestedConcurrency = Number(flags.concurrency) || 0; // 0 => auto
+  const maxConcurrency = Math.max(1, Math.floor(Number(flags.maxconc) || 64));
 
-        ["help", false],
+  if (!target) {
+    ns.tprint("No batch target provided. bin/timed-net-batcher2.js requires a target.");
+    ns.tprint("");
+    ns.tprint("Syntax");
+    ns.tprint("  run bin/timed-net-batcher2.js <target>");
+    ns.tprint("  run bin/timed-net-batcher2.js <target> --lowram");
+    return;
+  }
 
-        ["debug", false],
+  const hackScript = "workers/hwgw/batch-hack.js";
+  const growScript = "workers/hwgw/batch-grow.js";
+  const weakenScript = "workers/hwgw/batch-weaken.js";
 
-        ["concurrency", 0],   // 0 = auto (based on available RAM)
+  for (const s of [hackScript, growScript, weakenScript]) {
+    if (!ns.fileExists(s, "home")) {
+      ns.tprint(`Missing script on home: ${s}`);
+      return;
+    }
+  }
 
-        ["maxconc", 64],      // cap for auto/explicit concurrency
+  // Startup banner
+  const usingFormulas = hasFormulas(ns);
 
-    ]);
+  ns.tprint(`Timed HWGW batcher targeting: ${target}`);
+  ns.tprint(usingFormulas ? "Using Formulas.exe for batch timing." : "Formulas.exe not detected; using ns.getHack/Grow/WeakenTime.");
+  ns.tprint(lowRamMode ? "LOW-RAM MODE enabled." : "Normal mode enabled.");
+  ns.tprint(
+    `Hot reload enabled: rescan=${(FLEET_REFRESH_MS / 1000).toFixed(1)}s, ` +
+      `stable=${(FLEET_STABLE_MS / 1000).toFixed(1)}s, threshold=${PSERV_MIN_TOTAL_RAM}GB`
+  );
 
-    if (flags.help) {
+  const HOME_RAM_RESERVE = getHomeReserve(ns);
+  const GAP = 200; // ms
 
-        printHelp(ns);
+  // Fleet hot-reload state
+  // Track SCP state by "host:maxRam" so same-name upgrades re-SCP properly
+  const scpDone = new Set();
+  const scpKey = (host) => `${host}:${ns.getServerMaxRam(host)}`;
 
-        return;
+  let lastFleetRefresh = 0;
 
+  // Mode hysteresis state
+  let mode = "UNKNOWN"; // "HOME" | "HYBRID"
+  let pendingMode = null;
+  let pendingSince = 0;
+
+  let lastStatusPrint = 0;
+
+  // Small helper to refresh fleet + SCP new/changed pservs
+  const refreshFleet = async () => {
+    const purchased = ns.getPurchasedServers();
+
+    let totalPservRam = 0;
+    for (const host of purchased) totalPservRam += ns.getServerMaxRam(host);
+
+    for (const host of purchased) {
+      const key = scpKey(host);
+      if (scpDone.has(key)) continue;
+
+      await ns.scp([hackScript, growScript, weakenScript], host);
+      scpDone.add(key);
+
+      ns.print(`Fleet hot-reload: SCP'd batch workers to ${host} (key=${key})`);
     }
 
-    const target = flags._[0];
-
-    const lowRamMode = !!flags.lowram;
-
-    const debug = !!flags.debug;
-
-    const requestedConcurrency = Number(flags.concurrency) || 0; // 0 => auto
-
-    const maxConcurrency = Math.max(1, Math.floor(Number(flags.maxconc) || 64));
-
-    if (!target) {
-
-        ns.tprint("No batch target provided. bin/timed-net-batcher2.js requires a target.");
-
-        ns.tprint("");
-
-        ns.tprint("Syntax");
-
-        ns.tprint("  run bin/timed-net-batcher2.js <target>");
-
-        ns.tprint("  run bin/timed-net-batcher2.js <target> --lowram");
-
-        return;
-
+    // Clean up old keys for removed servers and old RAM sizes
+    const keep = new Set(purchased.map((h) => scpKey(h)));
+    for (const key of Array.from(scpDone)) {
+      if (!keep.has(key)) scpDone.delete(key);
     }
 
-    const hackScript   = "workers/hwgw/batch-hack.js";
+    return { purchased, totalPservRam };
+  };
 
-    const growScript   = "workers/hwgw/batch-grow.js";
+  const desiredModeFromFleet = (totalPservRam) => {
+    return totalPservRam >= PSERV_MIN_TOTAL_RAM ? "HYBRID" : "HOME";
+  };
 
-    const weakenScript = "workers/hwgw/batch-weaken.js";
+  const updateMode = (desired, now, totalPservRam) => {
+    if (mode === "UNKNOWN") {
+      mode = desired;
+      pendingMode = null;
+      pendingSince = 0;
 
-    for (const s of [hackScript, growScript, weakenScript]) {
-
-        if (!ns.fileExists(s, "home")) {
-
-            ns.tprint(`Missing script on home: ${s}`);
-
-            return;
-
-        }
-
+      ns.tprint(
+        `Mode set: ${mode === "HYBRID" ? "HYBRID (home+pservs)" : "HOME-only"} (initial) ` +
+          `(total pserv RAM=${totalPservRam.toFixed(1)}GB)`
+      );
+      return;
     }
 
-    // Startup banner
-
-    const usingFormulas = hasFormulas(ns);
-
-    ns.tprint(`Timed HWGW batcher targeting: ${target}`);
-
-    ns.tprint(
-
-        usingFormulas
-
-            ? "Using Formulas.exe for batch timing."
-
-            : "Formulas.exe not detected; using ns.getHack/Grow/WeakenTime."
-
-    );
-
-    ns.tprint(lowRamMode ? "LOW-RAM MODE enabled." : "Normal mode enabled.");
-
-    ns.tprint(
-
-        `Hot reload enabled: rescan=${(FLEET_REFRESH_MS / 1000).toFixed(1)}s, ` +
-
-        `stable=${(FLEET_STABLE_MS / 1000).toFixed(1)}s, threshold=${PSERV_MIN_TOTAL_RAM}GB`
-
-    );
-
-    const HOME_RAM_RESERVE = getHomeReserve(ns);
-
-    const GAP = 200; // ms
-
-    // Fleet hot-reload state
-
-    // Track SCP state by "host:maxRam" so same-name upgrades re-SCP properly
-
-    const scpDone = new Set();
-
-    const scpKey = (host) => `${host}:${ns.getServerMaxRam(host)}`;
-
-    let lastFleetRefresh = 0;
-
-    // Mode hysteresis state
-
-    let mode = "UNKNOWN"; // "HOME" | "HYBRID"
-
-    let pendingMode = null;
-
-    let pendingSince = 0;
-
-    let lastStatusPrint = 0;
-
-    // Small helper to refresh fleet + SCP new/changed pservs
-
-    const refreshFleet = async () => {
-
-        const purchased = ns.getPurchasedServers();
-
-        let totalPservRam = 0;
-
-        for (const host of purchased) totalPservRam += ns.getServerMaxRam(host);
-
-        for (const host of purchased) {
-
-            const key = scpKey(host);
-
-            if (scpDone.has(key)) continue;
-
-            await ns.scp([hackScript, growScript, weakenScript], host);
-
-            scpDone.add(key);
-
-            ns.print(`Fleet hot-reload: SCP'd batch workers to ${host} (key=${key})`);
-
-        }
-
-        // Clean up old keys for removed servers and old RAM sizes
-
-        const keep = new Set(purchased.map(h => scpKey(h)));
-
-        for (const key of Array.from(scpDone)) {
-
-            if (!keep.has(key)) scpDone.delete(key);
-
-        }
-
-        return { purchased, totalPservRam };
-
-    };
-
-    const desiredModeFromFleet = (totalPservRam) => {
-
-        return totalPservRam >= PSERV_MIN_TOTAL_RAM ? "HYBRID" : "HOME";
-
-    };
-
-    const updateMode = (desired, now, totalPservRam) => {
-
-        if (mode === "UNKNOWN") {
-
-            mode = desired;
-
-            pendingMode = null;
-
-            pendingSince = 0;
-
-            ns.tprint(
-
-                `Mode set: ${mode === "HYBRID" ? "HYBRID (home+pservs)" : "HOME-only"} (initial) ` +
-
-                `(total pserv RAM=${totalPservRam.toFixed(1)}GB)`
-
-            );
-
-            return;
-
-        }
-
-        if (desired === mode) {
-
-            pendingMode = null;
-
-            pendingSince = 0;
-
-            return;
-
-        }
-
-        if (pendingMode !== desired) {
-
-            pendingMode = desired;
-
-            pendingSince = now;
-
-            ns.print(`Mode change pending: ${mode} -> ${desired} (waiting for stability)`);
-
-            return;
-
-        }
-
-        if (now - pendingSince >= FLEET_STABLE_MS) {
-
-            mode = desired;
-
-            pendingMode = null;
-
-            pendingSince = 0;
-
-            ns.tprint(
-
-                `Mode switched: ${mode === "HYBRID" ? "HYBRID (home+pservs)" : "HOME-only"} ` +
-
-                `(total pserv RAM=${totalPservRam.toFixed(1)}GB)`
-
-            );
-
-        }
-
-    };
-
-    while (true) {
-
-        const now = Date.now();
-
-        if (now - lastFleetRefresh >= FLEET_REFRESH_MS) {
-
-            const fleet = await refreshFleet();
-
-            updateMode(desiredModeFromFleet(fleet.totalPservRam), now, fleet.totalPservRam);
-
-            lastFleetRefresh = now;
-
-        }
-
-        if (now - lastStatusPrint >= STATUS_INTERVAL) {
-
-            printTargetStatus(ns, target);
-
-            lastStatusPrint = now;
-
-        }
-
-        if (mode === "HOME") {
-
-            await runHomeOnlyTick(ns, {
-
-                target,
-
-                hackScript,
-
-                growScript,
-
-                weakenScript,
-
-                lowRamMode,
-
-                debug,
-
-                HOME_RAM_RESERVE,
-
-                GAP,
-
-            });
-
-            continue;
-
-        }
-
-        await runHybridTick(ns, {
-
-            target,
-
-            hackScript,
-
-            growScript,
-
-            weakenScript,
-
-            lowRamMode,
-
-            debug,
-
-            requestedConcurrency,
-
-            maxConcurrency,
-
-            HOME_RAM_RESERVE,
-
-            GAP,
-
-            purchased: ns.getPurchasedServers(),
-
-        });
-
+    if (desired === mode) {
+      pendingMode = null;
+      pendingSince = 0;
+      return;
     }
 
+    if (pendingMode !== desired) {
+      pendingMode = desired;
+      pendingSince = now;
+      ns.print(`Mode change pending: ${mode} -> ${desired} (waiting for stability)`);
+      return;
+    }
+
+    if (now - pendingSince >= FLEET_STABLE_MS) {
+      mode = desired;
+      pendingMode = null;
+      pendingSince = 0;
+
+      ns.tprint(
+        `Mode switched: ${mode === "HYBRID" ? "HYBRID (home+pservs)" : "HOME-only"} ` +
+          `(total pserv RAM=${totalPservRam.toFixed(1)}GB)`
+      );
+    }
+  };
+
+  while (true) {
+    const now = Date.now();
+
+    if (now - lastFleetRefresh >= FLEET_REFRESH_MS) {
+      const fleet = await refreshFleet();
+      updateMode(desiredModeFromFleet(fleet.totalPservRam), now, fleet.totalPservRam);
+      lastFleetRefresh = now;
+    }
+
+    if (now - lastStatusPrint >= STATUS_INTERVAL) {
+      printTargetStatus(ns, target);
+      lastStatusPrint = now;
+    }
+
+    if (mode === "HOME") {
+      await runHomeOnlyTick(ns, {
+        target,
+        hackScript,
+        growScript,
+        weakenScript,
+        lowRamMode,
+        debug,
+        HOME_RAM_RESERVE,
+        GAP,
+      });
+      continue;
+    }
+
+    await runHybridTick(ns, {
+      target,
+      hackScript,
+      growScript,
+      weakenScript,
+      lowRamMode,
+      debug,
+      requestedConcurrency,
+      maxConcurrency,
+      HOME_RAM_RESERVE,
+      GAP,
+      purchased: ns.getPurchasedServers(),
+    });
+  }
 }
 
 // ------------------------------------------------
-
 // HYBRID tick (one iteration)
-
 // ------------------------------------------------
-
 async function runHybridTick(ns, ctx) {
+  const {
+    target,
+    hackScript,
+    growScript,
+    weakenScript,
+    lowRamMode,
+    debug,
+    requestedConcurrency,
+    maxConcurrency,
+    HOME_RAM_RESERVE,
+    GAP,
+    purchased,
+  } = ctx;
 
-    const {
+  const pservSet = new Set(purchased);
+  const hosts = ["home", ...purchased];
 
-        target,
+  const workers = [];
+  let totalFree = 0;
 
-        hackScript,
+  for (const host of hosts) {
+    const maxRam = ns.getServerMaxRam(host);
+    const usedRam = ns.getServerUsedRam(host);
 
-        growScript,
+    let freeRam = maxRam - usedRam;
 
-        weakenScript,
-
-        lowRamMode,
-
-        debug,
-
-        requestedConcurrency,
-
-        maxConcurrency,
-
-        HOME_RAM_RESERVE,
-
-        GAP,
-
-        purchased,
-
-    } = ctx;
-
-    const pservSet = new Set(purchased);
-
-    const hosts = ["home", ...purchased];
-
-    const workers = [];
-
-    let totalFree = 0;
-
-    for (const host of hosts) {
-
-        const maxRam  = ns.getServerMaxRam(host);
-
-        const usedRam = ns.getServerUsedRam(host);
-
-        let freeRam   = maxRam - usedRam;
-
-        if (host === "home") {
-
-            freeRam = Math.max(0, maxRam - usedRam - HOME_RAM_RESERVE);
-
-        }
-
-        if (freeRam < 0.1) continue;
-
-        workers.push({ host, freeRam, isHome: host === "home", isPserv: pservSet.has(host) });
-
-        totalFree += freeRam;
-
+    if (host === "home") {
+      freeRam = Math.max(0, maxRam - usedRam - HOME_RAM_RESERVE);
     }
 
-    const money   = ns.getServerMoneyAvailable(target);
+    if (freeRam < 0.1) continue;
 
-    const max     = ns.getServerMaxMoney(target);
+    workers.push({
+      host,
+      freeRam,
+      isHome: host === "home",
+      isPserv: pservSet.has(host),
+    });
 
-    const sec     = ns.getServerSecurityLevel(target);
+    totalFree += freeRam;
+  }
 
-    const minSec  = ns.getServerMinSecurityLevel(target);
+  const money = ns.getServerMoneyAvailable(target);
+  const max = ns.getServerMaxMoney(target);
+  const sec = ns.getServerSecurityLevel(target);
+  const minSec = ns.getServerMinSecurityLevel(target);
 
-    const moneyRatio = max > 0 ? money / max : 0;
+  const moneyRatio = max > 0 ? money / max : 0;
+  const secDelta = sec - minSec;
 
-    const secDelta   = sec - minSec;
+  const moneyThresh = lowRamMode ? LOWRAM_MONEY_THRESHOLD : MONEY_THRESHOLD;
+  const secThresh = lowRamMode ? LOWRAM_SEC_TOLERANCE : SEC_TOLERANCE;
 
-    const moneyThresh = lowRamMode ? LOWRAM_MONEY_THRESHOLD : MONEY_THRESHOLD;
+  const moneyOk = moneyRatio >= moneyThresh;
+  const secOk = secDelta <= secThresh;
+  const prepping = !(moneyOk && secOk);
 
-    const secThresh   = lowRamMode ? LOWRAM_SEC_TOLERANCE   : SEC_TOLERANCE;
+  const times = getHackGrowWeakenTimes(ns, target, !prepping);
 
-    const moneyOk = moneyRatio >= moneyThresh;
+  const tHack = times.tHack;
+  const tGrow = times.tGrow;
+  const tWeaken = times.tWeaken;
 
-    const secOk   = secDelta <= secThresh;
+  const T = tWeaken + 4 * GAP;
+  const cycleTime = T + GAP;
 
-    const prepping = !(moneyOk && secOk);
+  const delayHack = Math.max(0, T - 3 * GAP - tHack);
+  const delayGrow = Math.max(0, T - 2 * GAP - tGrow);
+  const delayWeak1 = Math.max(0, T - 1 * GAP - tWeaken);
+  const delayWeak2 = Math.max(0, T - tWeaken);
 
-    const times = getHackGrowWeakenTimes(ns, target, !prepping);
+  if (totalFree <= 0) {
+    ns.print("No free RAM available for a new batch. Sleeping.");
+    await ns.sleep(Math.max(GAP, Math.floor(cycleTime / (lowRamMode ? 1 : 16))));
+    return;
+  }
 
-    const tHack   = times.tHack;
+  workers.sort((a, b) => b.freeRam - a.freeRam);
 
-    const tGrow   = times.tGrow;
+  const allowedRam = totalFree * BATCH_RAM_FRACTION;
 
-    const tWeaken = times.tWeaken;
+  const hackRam = ns.getScriptRam(hackScript);
+  const growRam = ns.getScriptRam(growScript);
+  const weakenRam = ns.getScriptRam(weakenScript);
 
-    const T = tWeaken + 4 * GAP;
+  let hackThreads = 0;
+  let growThreads = 0;
+  let weakenThreads = 0;
 
-    const cycleTime = T + GAP;
-
-    const delayHack  = Math.max(0, T - 3 * GAP - tHack);
-
-    const delayGrow  = Math.max(0, T - 2 * GAP - tGrow);
-
-    const delayWeak1 = Math.max(0, T - 1 * GAP - tWeaken);
-
-    const delayWeak2 = Math.max(0, T          - tWeaken);
-
-    if (totalFree <= 0) {
-
-        ns.print("No free RAM available for a new batch. Sleeping.");
-
-        await ns.sleep(Math.max(GAP, Math.floor(cycleTime / (lowRamMode ? 1 : 16))));
-
-        return;
-
-    }
-
-    workers.sort((a, b) => b.freeRam - a.freeRam);
-
-    const allowedRam = totalFree * BATCH_RAM_FRACTION;
-
-    const hackRam   = ns.getScriptRam(hackScript);
-
-    const growRam   = ns.getScriptRam(growScript);
-
-    const weakenRam = ns.getScriptRam(weakenScript);
-
-    let hackThreads = 0;
-
-    let growThreads = 0;
-
-    let weakenThreads = 0;
-
-    if (prepping) {
-
-        const weakenPerThread    = ns.weakenAnalyze(1);
-
-        const secPerGrowThread   = ns.growthAnalyzeSecurity(1);
-
-        if (secDelta > WEAKEN_FIRST_DELTA) {
-
-            growThreads = 0;
-
-            weakenThreads = weakenPerThread > 0
-
-                ? Math.max(1, Math.ceil(secDelta / weakenPerThread))
-
-                : 1;
-
-        } else {
-
-            if (moneyRatio < moneyThresh) {
-
-                const growMult = max > 0 && money > 0 ? max / Math.max(1, money) : 2;
-
-                growThreads = Math.max(1, Math.ceil(ns.growthAnalyze(target, growMult)));
-
-            } else {
-
-                growThreads = 0;
-
-            }
-
-            const secFromGrow = growThreads * secPerGrowThread;
-
-            const totalSecToRemove = Math.max(0, secDelta) + secFromGrow;
-
-            weakenThreads = weakenPerThread > 0
-
-                ? Math.max(1, Math.ceil(totalSecToRemove / weakenPerThread))
-
-                : 1;
-
-        }
-
-        let totalRamNeeded =
-
-            growThreads * growRam +
-
-            weakenThreads * weakenRam;
-
-        if (totalRamNeeded > allowedRam && totalRamNeeded > 0) {
-
-            const scale = allowedRam / totalRamNeeded;
-
-            growThreads   = Math.max(0, Math.floor(growThreads * scale));
-
-            weakenThreads = Math.max(1, Math.floor(weakenThreads * scale));
-
-            totalRamNeeded =
-
-                growThreads * growRam +
-
-                weakenThreads * weakenRam;
-
-        }
-
-        ns.print(`Prep batch: G=${growThreads}, W=${weakenThreads} (RAM=${totalRamNeeded.toFixed(1)}GB)`);
-
-        const homeHost = workers.find(w => w.isHome);
-
-        const nonHome  = workers.filter(w => !w.isHome);
-
-        const gwHosts  = homeHost ? [...nonHome, homeHost] : nonHome;
-
-        const launchedW = allocToHosts(ns, gwHosts, weakenScript, target, weakenThreads, 0, tWeaken);
-
-        const launchedG = growThreads > 0 ? allocToHosts(ns, gwHosts, growScript, target, growThreads, 0, tGrow) : 0;
-
-        if (launchedW < weakenThreads) ns.print(`WARN: Only launched W=${launchedW}/${weakenThreads} threads (prep).`);
-
-        if (growThreads > 0 && launchedG < growThreads) ns.print(`WARN: Only launched G=${launchedG}/${growThreads} threads (prep).`);
-
-        if (debug) {
-
-            ns.print(
-
-                `DEBUG: PREP sleeping ${ns.tFormat(tWeaken + 2 * GAP)} ` +
-
-                `(secDelta=${secDelta.toFixed(2)}, money=${(moneyRatio * 100).toFixed(2)}%)`
-
-            );
-
-        }
-
-        await ns.sleep(tWeaken + 2 * GAP);
-
-        return;
-
-    }
-
-    // MONEY batch
-
-    const pctPerHackThread = ns.hackAnalyze(target);
-
-    if (pctPerHackThread > 0) {
-
-        let desiredThreads = Math.floor(TARGET_HACK_FRACTION / pctPerHackThread);
-
-        const maxThreads = Math.floor(MAX_HACK_FRACTION / pctPerHackThread);
-
-        if (maxThreads > 0) desiredThreads = Math.min(desiredThreads, maxThreads);
-
-        hackThreads = Math.max(1, desiredThreads);
-
-    } else {
-
-        hackThreads = 1;
-
-    }
-
-    const growMult = 1 / (1 - TARGET_HACK_FRACTION);
-
-    growThreads = Math.ceil(ns.growthAnalyze(target, growMult));
-
-    if (growThreads < 1) growThreads = 1;
-
-    const secIncHack = ns.hackAnalyzeSecurity(hackThreads);
-
-    const secIncGrow = ns.growthAnalyzeSecurity(growThreads);
-
-    const totalSec   = secIncHack + secIncGrow;
-
+  if (prepping) {
     const weakenPerThread = ns.weakenAnalyze(1);
+    const secPerGrowThread = ns.growthAnalyzeSecurity(1);
 
-    weakenThreads = weakenPerThread > 0 ? Math.ceil(totalSec / weakenPerThread) : 1;
+    if (secDelta > WEAKEN_FIRST_DELTA) {
+      growThreads = 0;
+      weakenThreads = weakenPerThread > 0 ? Math.max(1, Math.ceil(secDelta / weakenPerThread)) : 1;
+    } else {
+      if (moneyRatio < moneyThresh) {
+        const growMult = max > 0 && money > 0 ? max / Math.max(1, money) : 2;
+        growThreads = Math.max(1, Math.ceil(ns.growthAnalyze(target, growMult)));
+      } else {
+        growThreads = 0;
+      }
 
-    if (weakenThreads < 1) weakenThreads = 1;
+      const secFromGrow = growThreads * secPerGrowThread;
+      const totalSecToRemove = Math.max(0, secDelta) + secFromGrow;
 
-    let totalRamNeeded =
+      weakenThreads = weakenPerThread > 0 ? Math.max(1, Math.ceil(totalSecToRemove / weakenPerThread)) : 1;
+    }
 
-        hackThreads * hackRam +
-
-        growThreads * growRam +
-
-        weakenThreads * weakenRam * 2;
+    let totalRamNeeded = growThreads * growRam + weakenThreads * weakenRam;
 
     if (totalRamNeeded > allowedRam && totalRamNeeded > 0) {
-
-        const scale = allowedRam / totalRamNeeded;
-
-        hackThreads   = Math.max(1, Math.floor(hackThreads * scale));
-
-        growThreads   = Math.max(1, Math.floor(growThreads * scale));
-
-        weakenThreads = Math.max(1, Math.floor(weakenThreads * scale));
-
-        totalRamNeeded =
-
-            hackThreads * hackRam +
-
-            growThreads * growRam +
-
-            weakenThreads * weakenRam * 2;
-
+      const scale = allowedRam / totalRamNeeded;
+      growThreads = Math.max(0, Math.floor(growThreads * scale));
+      weakenThreads = Math.max(1, Math.floor(weakenThreads * scale));
+      totalRamNeeded = growThreads * growRam + weakenThreads * weakenRam;
     }
 
-    let concurrency = lowRamMode ? 1 : 16;
+    ns.print(`Prep batch: G=${growThreads}, W=${weakenThreads} (RAM=${totalRamNeeded.toFixed(1)}GB)`);
 
-    if (!lowRamMode) {
-
-        const maxByTiming = Math.max(1, Math.floor(cycleTime / GAP) - 1);
-
-        if (requestedConcurrency > 0) {
-
-            concurrency = clampInt(requestedConcurrency, 1, Math.min(maxConcurrency, maxByTiming));
-
-        } else {
-
-            const ramPerBatch = Math.max(1, totalRamNeeded);
-
-            const maxByRam = Math.max(1, Math.floor(allowedRam / ramPerBatch));
-
-            concurrency = clampInt(maxByRam, 1, Math.min(maxConcurrency, maxByTiming));
-
-        }
-
-    }
-
-    const batchInterval = Math.max(GAP, Math.floor(cycleTime / concurrency));
-
-    ns.print(
-
-        `Money batch: H=${hackThreads}, G=${growThreads}, ` +
-
-        `W1=${weakenThreads}, W2=${weakenThreads} (RAM=${totalRamNeeded.toFixed(1)}GB, conc=${concurrency})`
-
-    );
-
-    const homeHost = workers.find(w => w.isHome);
-
-    const nonHome  = workers.filter(w => !w.isHome);
-
+    const homeHost = workers.find((w) => w.isHome);
+    const nonHome = workers.filter((w) => !w.isHome);
     const gwHosts = homeHost ? [...nonHome, homeHost] : nonHome;
 
-    const launchedW1 = allocToHosts(ns, gwHosts, weakenScript, target, weakenThreads, delayWeak1, tWeaken);
+    const launchedW = allocToHosts(ns, gwHosts, weakenScript, target, weakenThreads, 0, tWeaken);
+    const launchedG = growThreads > 0 ? allocToHosts(ns, gwHosts, growScript, target, growThreads, 0, tGrow) : 0;
 
-    let launchedH = 0;
-
-    if (hackThreads > 0) {
-
-        let remainingH = hackThreads;
-
-        if (homeHost) {
-
-            const launchedHome = allocToHosts(ns, [homeHost], hackScript, target, remainingH, delayHack, tHack);
-
-            launchedH += launchedHome;
-
-            remainingH -= launchedHome;
-
-        }
-
-        if (remainingH > 0) {
-
-            const launchedElsewhere = allocToHosts(ns, nonHome, hackScript, target, remainingH, delayHack, tHack);
-
-            launchedH += launchedElsewhere;
-
-            remainingH -= launchedElsewhere;
-
-        }
-
-    }
-
-    const launchedG = growThreads > 0
-
-        ? allocToHosts(ns, gwHosts, growScript, target, growThreads, delayGrow, tGrow)
-
-        : 0;
-
-    const launchedW2 = allocToHosts(ns, gwHosts, weakenScript, target, weakenThreads, delayWeak2, tWeaken);
-
-    if (launchedW1 < weakenThreads) ns.print(`WARN: Only launched W1=${launchedW1}/${weakenThreads}`);
-
-    if (launchedH  < hackThreads)   ns.print(`WARN: Only launched H=${launchedH}/${hackThreads}`);
-
-    if (launchedG  < growThreads)   ns.print(`WARN: Only launched G=${launchedG}/${growThreads}`);
-
-    if (launchedW2 < weakenThreads) ns.print(`WARN: Only launched W2=${launchedW2}/${weakenThreads}`);
+    if (launchedW < weakenThreads) ns.print(`WARN: Only launched W=${launchedW}/${weakenThreads} threads (prep).`);
+    if (growThreads > 0 && launchedG < growThreads) ns.print(`WARN: Only launched G=${launchedG}/${growThreads} threads (prep).`);
 
     if (debug) {
-
-        ns.print(
-
-            `DEBUG: batchInterval=${ns.tFormat(batchInterval)} conc=${concurrency}, freeRAM~${totalFree.toFixed(0)}GB`
-
-        );
-
+      ns.print(
+        `DEBUG: PREP sleeping ${ns.tFormat(tWeaken + 2 * GAP)} ` +
+          `(secDelta=${secDelta.toFixed(2)}, money=${(moneyRatio * 100).toFixed(2)}%)`
+      );
     }
 
-    await ns.sleep(batchInterval);
+    await ns.sleep(tWeaken + 2 * GAP);
+    return;
+  }
 
+  // MONEY batch
+  const pctPerHackThread = ns.hackAnalyze(target);
+
+  if (pctPerHackThread > 0) {
+    let desiredThreads = Math.floor(TARGET_HACK_FRACTION / pctPerHackThread);
+    const maxThreads = Math.floor(MAX_HACK_FRACTION / pctPerHackThread);
+    if (maxThreads > 0) desiredThreads = Math.min(desiredThreads, maxThreads);
+    hackThreads = Math.max(1, desiredThreads);
+  } else {
+    hackThreads = 1;
+  }
+
+  const growMult = 1 / (1 - TARGET_HACK_FRACTION);
+  growThreads = Math.ceil(ns.growthAnalyze(target, growMult));
+  if (growThreads < 1) growThreads = 1;
+
+  const secIncHack = ns.hackAnalyzeSecurity(hackThreads);
+  const secIncGrow = ns.growthAnalyzeSecurity(growThreads);
+  const totalSec = secIncHack + secIncGrow;
+
+  const weakenPerThread = ns.weakenAnalyze(1);
+  weakenThreads = weakenPerThread > 0 ? Math.ceil(totalSec / weakenPerThread) : 1;
+  if (weakenThreads < 1) weakenThreads = 1;
+
+  let totalRamNeeded =
+    hackThreads * hackRam +
+    growThreads * growRam +
+    weakenThreads * weakenRam * 2;
+
+  if (totalRamNeeded > allowedRam && totalRamNeeded > 0) {
+    const scale = allowedRam / totalRamNeeded;
+
+    hackThreads = Math.max(1, Math.floor(hackThreads * scale));
+    growThreads = Math.max(1, Math.floor(growThreads * scale));
+    weakenThreads = Math.max(1, Math.floor(weakenThreads * scale));
+
+    totalRamNeeded =
+      hackThreads * hackRam +
+      growThreads * growRam +
+      weakenThreads * weakenRam * 2;
+  }
+
+  let concurrency = lowRamMode ? 1 : 16;
+
+  if (!lowRamMode) {
+    const maxByTiming = Math.max(1, Math.floor(cycleTime / GAP) - 1);
+
+    if (requestedConcurrency > 0) {
+      concurrency = clampInt(requestedConcurrency, 1, Math.min(maxConcurrency, maxByTiming));
+    } else {
+      const ramPerBatch = Math.max(1, totalRamNeeded);
+      const maxByRam = Math.max(1, Math.floor(allowedRam / ramPerBatch));
+      concurrency = clampInt(maxByRam, 1, Math.min(maxConcurrency, maxByTiming));
+    }
+  }
+
+  const batchInterval = Math.max(GAP, Math.floor(cycleTime / concurrency));
+
+  ns.print(
+    `Money batch: H=${hackThreads}, G=${growThreads}, ` +
+      `W1=${weakenThreads}, W2=${weakenThreads} (RAM=${totalRamNeeded.toFixed(1)}GB, conc=${concurrency})`
+  );
+
+  const homeHost = workers.find((w) => w.isHome);
+  const nonHome = workers.filter((w) => !w.isHome);
+  const gwHosts = homeHost ? [...nonHome, homeHost] : nonHome;
+
+  const launchedW1 = allocToHosts(ns, gwHosts, weakenScript, target, weakenThreads, delayWeak1, tWeaken);
+
+  let launchedH = 0;
+
+  if (hackThreads > 0) {
+    let remainingH = hackThreads;
+
+    if (homeHost) {
+      const launchedHome = allocToHosts(ns, [homeHost], hackScript, target, remainingH, delayHack, tHack);
+      launchedH += launchedHome;
+      remainingH -= launchedHome;
+    }
+
+    if (remainingH > 0) {
+      const launchedElsewhere = allocToHosts(ns, nonHome, hackScript, target, remainingH, delayHack, tHack);
+      launchedH += launchedElsewhere;
+      remainingH -= launchedElsewhere;
+    }
+  }
+
+  const launchedG = growThreads > 0 ? allocToHosts(ns, gwHosts, growScript, target, growThreads, delayGrow, tGrow) : 0;
+  const launchedW2 = allocToHosts(ns, gwHosts, weakenScript, target, weakenThreads, delayWeak2, tWeaken);
+
+  if (launchedW1 < weakenThreads) ns.print(`WARN: Only launched W1=${launchedW1}/${weakenThreads}`);
+  if (launchedH < hackThreads) ns.print(`WARN: Only launched H=${launchedH}/${hackThreads}`);
+  if (launchedG < growThreads) ns.print(`WARN: Only launched G=${launchedG}/${growThreads}`);
+  if (launchedW2 < weakenThreads) ns.print(`WARN: Only launched W2=${launchedW2}/${weakenThreads}`);
+
+  if (debug) {
+    ns.print(`DEBUG: batchInterval=${ns.tFormat(batchInterval)} conc=${concurrency}, freeRAM~${totalFree.toFixed(0)}GB`);
+  }
+
+  await ns.sleep(batchInterval);
 }
 
 // ------------------------------------------------
-
 // HOME-only tick (one iteration)
-
 // ------------------------------------------------
-
 async function runHomeOnlyTick(ns, ctx) {
+  const { target, hackScript, growScript, weakenScript, lowRamMode, debug, HOME_RAM_RESERVE, GAP } = ctx;
 
-    const {
+  const tHack = ns.getHackTime(target);
+  const tGrow = ns.getGrowTime(target);
+  const tWeaken = ns.getWeakenTime(target);
 
-        target,
+  const T = tWeaken + 4 * GAP;
 
-        hackScript,
+  const delayHack = Math.max(0, T - 3 * GAP - tHack);
+  const delayGrow = Math.max(0, T - 2 * GAP - tGrow);
+  const delayWeak1 = Math.max(0, T - 1 * GAP - tWeaken);
+  const delayWeak2 = Math.max(0, T - tWeaken);
 
-        growScript,
+  const cycleTime = T + GAP;
+  const DESIRED_CONCURRENCY = lowRamMode ? 1 : 8;
+  const batchInterval = Math.max(GAP, Math.floor(cycleTime / DESIRED_CONCURRENCY));
 
-        weakenScript,
+  const maxRam = ns.getServerMaxRam("home");
+  const usedRam = ns.getServerUsedRam("home");
 
-        lowRamMode,
+  let freeRam = maxRam - usedRam - HOME_RAM_RESERVE;
+  if (freeRam < 0) freeRam = 0;
 
-        debug,
-
-        HOME_RAM_RESERVE,
-
-        GAP,
-
-    } = ctx;
-
-    const tHack   = ns.getHackTime(target);
-
-    const tGrow   = ns.getGrowTime(target);
-
-    const tWeaken = ns.getWeakenTime(target);
-
-    const T = tWeaken + 4 * GAP;
-
-    const delayHack   = Math.max(0, T - 3 * GAP - tHack);
-
-    const delayGrow   = Math.max(0, T - 2 * GAP - tGrow);
-
-    const delayWeak1  = Math.max(0, T - 1 * GAP - tWeaken);
-
-    const delayWeak2  = Math.max(0, T          - tWeaken);
-
-    const cycleTime = T + GAP;
-
-    const DESIRED_CONCURRENCY = lowRamMode ? 1 : 8;
-
-    const batchInterval = Math.max(GAP, Math.floor(cycleTime / DESIRED_CONCURRENCY));
-
-    const maxRam  = ns.getServerMaxRam("home");
-
-    const usedRam = ns.getServerUsedRam("home");
-
-    let freeRam   = maxRam - usedRam - HOME_RAM_RESERVE;
-
-    if (freeRam < 0) freeRam = 0;
-
-    // LowRAM safety: wait for worker scripts to finish (no overlap)
-
-    if (lowRamMode) {
-
-        const procs = ns.ps("home");
-
-        const busy = procs.some(p =>
-
-            p.filename === hackScript ||
-
-            p.filename === growScript ||
-
-            p.filename === weakenScript
-
-        );
-
-        if (busy) {
-
-            if (debug) ns.print("Home-only lowram: workers still running. Sleeping.");
-
-            await ns.sleep(GAP);
-
-            return;
-
-        }
-
-    }
-
-    const hackRam   = ns.getScriptRam(hackScript);
-
-    const growRam   = ns.getScriptRam(growScript);
-
-    const weakenRam = ns.getScriptRam(weakenScript);
-
-    const baseHack = 2;
-
-    const baseGrow = 4;
-
-    const baseWeak = 4;
-
-    // Minimum "full batch" RAM footprint (must be fully affordable)
-
-    const ramBase =
-
-        baseHack * hackRam +
-
-        baseGrow * growRam +
-
-        2 * baseWeak * weakenRam;
-
-    // FIX: avoid partial launches
-
-    if (freeRam < ramBase) {
-
-        ns.print(
-
-            `Home-only mode: insufficient free RAM for full batch ` +
-
-            `(free=${freeRam.toFixed(1)}GB, need=${ramBase.toFixed(1)}GB). Sleeping.`
-
-        );
-
-        await ns.sleep(batchInterval);
-
-        return;
-
-    }
-
-    let mult = Math.floor(freeRam / ramBase);
-
-    if (mult < 1) mult = 1;
-
-    const pctPerHackThread = ns.hackAnalyze(target);
-
-    const basePct          = baseHack * pctPerHackThread;
-
-    const MAX_HACK_FRACTION_HOME = 0.9;
-
-    if (basePct > 0) {
-
-        const safeMult = Math.floor(MAX_HACK_FRACTION_HOME / basePct);
-
-        if (safeMult > 0 && safeMult < mult) mult = safeMult;
-
-    }
-
-    const hackThreads    = Math.max(1, baseHack * mult);
-
-    const growThreads    = Math.max(1, baseGrow * mult);
-
-    const weaken1Threads = Math.max(1, baseWeak * mult);
-
-    const weaken2Threads = Math.max(1, baseWeak * mult);
-
-    const ramUsed =
-
-        hackThreads * hackRam +
-
-        growThreads * growRam +
-
-        (weaken1Threads + weaken2Threads) * weakenRam;
-
-    ns.print(
-
-        "Home batch: " +
-
-        `H=${hackThreads}, G=${growThreads}, ` +
-
-        `W1=${weaken1Threads}, W2=${weaken2Threads} ` +
-
-        `(RAM=${ramUsed.toFixed(1)}GB${lowRamMode ? ", lowram" : ""})`
-
+  // LowRAM safety: wait for worker scripts to finish (no overlap)
+  if (lowRamMode) {
+    const procs = ns.ps("home");
+    const busy = procs.some(
+      (p) => p.filename === hackScript || p.filename === growScript || p.filename === weakenScript
     );
 
-    if (debug) {
-
-        ns.print(
-
-            `DEBUG: home free=${freeRam.toFixed(1)}GB reserve=${HOME_RAM_RESERVE.toFixed(1)}GB ` +
-
-            `ramBase=${ramBase.toFixed(1)}GB mult=${mult}`
-
-        );
-
+    if (busy) {
+      if (debug) ns.print("Home-only lowram: workers still running. Sleeping.");
+      await ns.sleep(GAP);
+      return;
     }
+  }
 
-    const host = { host: "home", freeRam };
+  const hackRam = ns.getScriptRam(hackScript);
+  const growRam = ns.getScriptRam(growScript);
+  const weakenRam = ns.getScriptRam(weakenScript);
 
-    allocToHosts(ns, [host], weakenScript, target, weaken1Threads, delayWeak1, tWeaken);
+  const baseHack = 2;
+  const baseGrow = 4;
+  const baseWeak = 4;
 
-    allocToHosts(ns, [host], hackScript,   target, hackThreads,    delayHack,  tHack);
+  // Minimum "full batch" RAM footprint (must be fully affordable)
+  const ramBase =
+    baseHack * hackRam +
+    baseGrow * growRam +
+    2 * baseWeak * weakenRam;
 
-    allocToHosts(ns, [host], growScript,   target, growThreads,    delayGrow,  tGrow);
-
-    allocToHosts(ns, [host], weakenScript, target, weaken2Threads, delayWeak2, tWeaken);
-
+  // FIX: avoid partial launches
+  if (freeRam < ramBase) {
+    ns.print(
+      `Home-only mode: insufficient free RAM for full batch ` +
+        `(free=${freeRam.toFixed(1)}GB, need=${ramBase.toFixed(1)}GB). Sleeping.`
+    );
     await ns.sleep(batchInterval);
+    return;
+  }
 
+  let mult = Math.floor(freeRam / ramBase);
+  if (mult < 1) mult = 1;
+
+  const pctPerHackThread = ns.hackAnalyze(target);
+  const basePct = baseHack * pctPerHackThread;
+
+  const MAX_HACK_FRACTION_HOME = 0.9;
+
+  if (basePct > 0) {
+    const safeMult = Math.floor(MAX_HACK_FRACTION_HOME / basePct);
+    if (safeMult > 0 && safeMult < mult) mult = safeMult;
+  }
+
+  const hackThreads = Math.max(1, baseHack * mult);
+  const growThreads = Math.max(1, baseGrow * mult);
+  const weaken1Threads = Math.max(1, baseWeak * mult);
+  const weaken2Threads = Math.max(1, baseWeak * mult);
+
+  const ramUsed =
+    hackThreads * hackRam +
+    growThreads * growRam +
+    (weaken1Threads + weaken2Threads) * weakenRam;
+
+  ns.print(
+    "Home batch: " +
+      `H=${hackThreads}, G=${growThreads}, ` +
+      `W1=${weaken1Threads}, W2=${weaken2Threads} ` +
+      `(RAM=${ramUsed.toFixed(1)}GB${lowRamMode ? ", lowram" : ""})`
+  );
+
+  if (debug) {
+    ns.print(
+      `DEBUG: home free=${freeRam.toFixed(1)}GB reserve=${HOME_RAM_RESERVE.toFixed(1)}GB ` +
+        `ramBase=${ramBase.toFixed(1)}GB mult=${mult}`
+    );
+  }
+
+  const host = { host: "home", freeRam };
+
+  allocToHosts(ns, [host], weakenScript, target, weaken1Threads, delayWeak1, tWeaken);
+  allocToHosts(ns, [host], hackScript, target, hackThreads, delayHack, tHack);
+  allocToHosts(ns, [host], growScript, target, growThreads, delayGrow, tGrow);
+  allocToHosts(ns, [host], weakenScript, target, weaken2Threads, delayWeak2, tWeaken);
+
+  await ns.sleep(batchInterval);
 }
 
 // ------------------------------------------------
-
 // ALLOCATION HELPERS
-
 // ------------------------------------------------
 
 /**
-
  * Allocate threads for a given script across a list of hosts.
-
  * Returns the number of threads successfully launched.
-
  */
-
 function allocToHosts(ns, hosts, script, target, threadsNeeded, delay = 0, extraArg = null) {
+  if (threadsNeeded <= 0) return 0;
 
-    if (threadsNeeded <= 0) return 0;
+  const ramPerThread = ns.getScriptRam(script);
+  if (ramPerThread <= 0) return 0;
 
-    const ramPerThread = ns.getScriptRam(script);
+  let launched = 0;
 
-    if (ramPerThread <= 0) return 0;
+  for (const h of hosts) {
+    if (threadsNeeded <= 0) break;
+    if (h.freeRam < ramPerThread) continue;
 
-    let launched = 0;
+    const maxThreadsHere = Math.floor(h.freeRam / ramPerThread);
+    if (maxThreadsHere <= 0) continue;
 
-    for (const h of hosts) {
+    const allocate = Math.min(maxThreadsHere, threadsNeeded);
 
-        if (threadsNeeded <= 0) break;
+    const pid =
+      extraArg == null
+        ? ns.exec(script, h.host, allocate, target, delay)
+        : ns.exec(script, h.host, allocate, target, delay, extraArg);
 
-        if (h.freeRam < ramPerThread) continue;
-
-        const maxThreadsHere = Math.floor(h.freeRam / ramPerThread);
-
-        if (maxThreadsHere <= 0) continue;
-
-        const allocate = Math.min(maxThreadsHere, threadsNeeded);
-
-        const pid = extraArg == null
-
-            ? ns.exec(script, h.host, allocate, target, delay)
-
-            : ns.exec(script, h.host, allocate, target, delay, extraArg);
-
-        if (pid !== 0) {
-
-            h.freeRam -= allocate * ramPerThread;
-
-            threadsNeeded -= allocate;
-
-            launched += allocate;
-
-        }
-
+    if (pid !== 0) {
+      h.freeRam -= allocate * ramPerThread;
+      threadsNeeded -= allocate;
+      launched += allocate;
     }
+  }
 
-    return launched;
-
+  return launched;
 }
 
 // ------------------------------------------------
-
 // STATUS HELPERS
-
 // ------------------------------------------------
-
 function printTargetStatus(ns, target) {
+  const money = ns.getServerMoneyAvailable(target);
+  const max = ns.getServerMaxMoney(target);
+  const sec = ns.getServerSecurityLevel(target);
+  const minSec = ns.getServerMinSecurityLevel(target);
 
-    const money   = ns.getServerMoneyAvailable(target);
+  const moneyPct = max > 0 ? (money / max) * 100 : 0;
+  const secDelta = sec - minSec;
 
-    const max     = ns.getServerMaxMoney(target);
+  const now = new Date();
+  const ts = now.toLocaleTimeString();
 
-    const sec     = ns.getServerSecurityLevel(target);
-
-    const minSec  = ns.getServerMinSecurityLevel(target);
-
-    const moneyPct = max > 0 ? (money / max) * 100 : 0;
-
-    const secDelta = sec - minSec;
-
-    const now = new Date();
-
-    const ts = now.toLocaleTimeString();
-
-    ns.print("--------------------------------------");
-
-    ns.print(`TARGET STATUS - ${target} @ ${ts}`);
-
-    ns.print(
-
-        `Money:       ${ns.nFormat(money, "$0.00a")} / ` +
-
-        `${ns.nFormat(max, "$0.00a")} (${moneyPct.toFixed(2)}%)`
-
-    );
-
-    ns.print(
-
-        `Security:    ${sec.toFixed(2)} (min ${minSec.toFixed(2)})  delta=${secDelta.toFixed(2)}`
-
-    );
-
-    ns.print("--------------------------------------");
-
+  ns.print("--------------------------------------");
+  ns.print(`TARGET STATUS - ${target} @ ${ts}`);
+  ns.print(`Money:       ${ns.nFormat(money, "$0.00a")} / ${ns.nFormat(max, "$0.00a")} (${moneyPct.toFixed(2)}%)`);
+  ns.print(`Security:    ${sec.toFixed(2)} (min ${minSec.toFixed(2)})  delta=${secDelta.toFixed(2)}`);
+  ns.print("--------------------------------------");
 }
 
 function clampInt(value, min, max) {
-
-    const v = Math.floor(Number(value) || 0);
-
-    return Math.min(max, Math.max(min, v));
-
+  const v = Math.floor(Number(value) || 0);
+  return Math.min(max, Math.max(min, v));
 }
-
-// fixed lowram and hot swappable pserv handling 
 
 ```
 /* == END FILE == */
@@ -7576,562 +5740,288 @@ NOTES
 /* == FILE: bin/tools/deploy-net.js == */
 ```js
 /** /bin/deploy-net.js
-
  *
-
  * Deploy /botnet/remote-hgw.js across the network.
-
  *
-
  * - Optional positional arg: target hostname to attack.
-
  * - If no target is given, automatically picks a "best" money server.
-
  * - Attempts to gain root on each server where possible.
-
  * - Kills existing scripts on each host, then runs remote-hgw.js there.
-
  * - Also uses some of home's RAM after deploying to the network.
-
  *
-
  * Usage:
-
  *   run /bin/deploy-net.js
-
  *   run /bin/deploy-net.js <target>
-
  *   run /bin/deploy-net.js --help
-
  *
-
  * @param {NS} ns
-
  */
-
 // ------------------------------------------------------------
-
 // Minimal HELP: Description, Notes, Syntax
-
 // ------------------------------------------------------------
-
 function printHelp(ns) {
-
     const script = "/bin/deploy-net.js";
-
     ns.tprint("==============================================================");
-
     ns.tprint(`HELP - ${script}`);
-
     ns.tprint("==============================================================");
-
     ns.tprint("");
-
     // DESCRIPTION
-
     ns.tprint("DESCRIPTION");
-
     ns.tprint("  Deploys /botnet/remote-hgw.js to all rooted servers with usable RAM,");
-
     ns.tprint("  auto-selecting a good money target if none is specified.");
-
     ns.tprint("");
-
     ns.tprint("  For each non-home server it will:");
-
     ns.tprint("    - Attempt to gain root access using available port crackers;");
-
     ns.tprint("    - Kill all running scripts;");
-
     ns.tprint("    - Copy /botnet/remote-hgw.js; and");
-
     ns.tprint("    - Launch it with as many threads as RAM allows.");
-
     ns.tprint("");
-
     ns.tprint("  Afterward, it also uses spare RAM on home to run remote-hgw.js.");
-
     ns.tprint("");
-
     // NOTES
-
     ns.tprint("NOTES");
-
     ns.tprint("  - Requires /botnet/remote-hgw.js to exist on home.");
-
     ns.tprint("  - Uses findBestTarget(ns) when no explicit target is provided.");
-
     ns.tprint("  - Only deploys to servers where you have (or can gain) root access.");
-
     ns.tprint("  - Skips servers with less than 2GB of RAM.");
-
     ns.tprint("  - Leaves a small RAM reserve on home for other scripts.");
-
     ns.tprint("");
-
     // SYNTAX
-
     ns.tprint("SYNTAX");
-
     ns.tprint("  run /bin/deploy-net.js");
-
     ns.tprint("  run /bin/deploy-net.js <target>");
-
     ns.tprint("  run /bin/deploy-net.js --help");
-
     ns.tprint("");
-
     ns.tprint("==============================================================");
-
     ns.tprint("");
-
 }
-
 // ------------------------------------------------------------
-
 // Flag parser for this script
-
 // ------------------------------------------------------------
-
 function parseFlags(ns) {
-
     const flags = ns.flags([
-
         ["help", false],
-
     ]);
   if (flags.help) {
     printHelp(ns);
     return;
   }
-
     const positionals = flags._ || [];
-
     const wantsHelp = flags.help;
-
     return { flags, positionals, wantsHelp };
-
 }
-
 // ------------------------------------------------------------
-
 // MAIN
-
 // ------------------------------------------------------------
-
 /** @param {NS} ns */
-
 export async function main(ns) {
-
     ns.disableLog("ALL");
-
     const { positionals, wantsHelp } = parseFlags(ns);
-
     if (wantsHelp) {
-
         printHelp(ns);
-
         return;
-
     }
-
     const manualTarget = positionals[0] || null;
-
     const target = manualTarget || findBestTarget(ns);
-
     if (!target) {
-
         ns.tprint("No suitable target found.");
-
         return;
-
     }
-
     const workerScript = "//botnet/remote-hgw.js";
-
     if (!ns.fileExists(workerScript, "home")) {
-
         ns.tprint(`Cannot deploy - ${workerScript} not found on home.`);
-
         return;
-
     }
-
     ns.tprint(`Deploying remote HGW farm against target: ${target}`);
-
     const servers = getAllServers(ns);
-
     const portCrackers = countPortCrackers(ns);
-
     for (const host of servers) {
-
         if (host === "home") continue; // handle home separately
-
         // Try to gain root if we do not have it yet
-
         if (!ns.hasRootAccess(host)) {
-
             tryRoot(ns, host, portCrackers);
-
         }
-
         if (!ns.hasRootAccess(host)) {
-
             ns.print(`Skipping ${host}: no root access.`);
-
             continue;
-
         }
-
         const maxRam = ns.getServerMaxRam(host);
-
         if (maxRam < 2) {
-
             ns.print(`Skipping ${host}: not enough RAM (${maxRam} GB).`);
-
             continue;
-
         }
-
         // Clear the box
-
         ns.killall(host);
-
         // Copy worker script
-
         const copied = await ns.scp(workerScript, host);
-
         if (!copied) {
-
             ns.print(`Failed to copy ${workerScript} to ${host}.`);
-
             continue;
-
         }
-
         const scriptRam = ns.getScriptRam(workerScript);
-
         const usableRam = maxRam * 0.95; // leave 5% breathing room
-
         const threads = Math.floor(usableRam / scriptRam);
-
         if (threads < 1) {
-
             ns.print(`Not enough RAM on ${host} for even 1 thread.`);
-
             continue;
-
         }
-
         const pid = ns.exec(workerScript, host, threads, target);
-
         if (pid === 0) {
-
             ns.print(`Failed to exec ${workerScript} on ${host}.`);
-
         } else {
-
             ns.print(`${host}: running ${workerScript} x${threads} versus ${target}.`);
-
         }
-
     }
-
     // Optionally, also use some RAM on home itself
-
     await deployToHome(ns, target);
-
     ns.tprint("Network deployment complete.");
-
 }
-
 // ------------------------------------------------------------
-
 // Existing helpers (logic preserved, logs de-emoji-fied)
-
 // ------------------------------------------------------------
-
 /** Use some of home's RAM as well */
-
 async function deployToHome(ns, target) {
-
     const host = "home";
-
     const script = "//botnet/remote-hgw.js";
-
     const maxRam  = ns.getServerMaxRam(host);
-
     const usedRam = ns.getServerUsedRam(host);
-
     // Leave 32 GB free on home for you / misc scripts
-
     const reserved = 32;
-
     const usableRam = Math.max(0, maxRam - usedRam - reserved);
-
     if (usableRam < 2) {
-
         ns.print("Not enough free RAM on home to deploy.");
-
         return;
-
     }
-
     const copied = await ns.scp(script, host);
-
     if (!copied) {
-
         ns.print(`Failed to copy ${script} to home.`);
-
         return;
-
     }
-
     const scriptRam = ns.getScriptRam(script);
-
     const threads = Math.floor(usableRam / scriptRam);
-
     if (threads < 1) {
-
         ns.print("Not enough RAM on home for even 1 thread.");
-
         return;
-
     }
-
     ns.print(`home: running ${script} x${threads} versus ${target}.`);
-
     ns.exec(script, host, threads, target);
-
 }
-
 /** DFS search to get all servers from 'home' */
-
 function getAllServers(ns) {
-
     const visited = new Set();
-
     const stack = ["home"];
-
     while (stack.length > 0) {
-
         const host = stack.pop();
-
         if (visited.has(host)) continue;
-
         visited.add(host);
-
         for (const neighbor of ns.scan(host)) {
-
             if (!visited.has(neighbor)) {
-
                 stack.push(neighbor);
-
             }
-
         }
-
     }
-
     return Array.from(visited);
-
 }
-
 /** Count how many port crackers we have */
-
 function countPortCrackers(ns) {
-
     const programs = [
-
         "BruteSSH.exe",
-
         "FTPCrack.exe",
-
         "relaySMTP.exe",
-
         "HTTPWorm.exe",
-
         "SQLInject.exe",
-
     ];
-
     return programs.filter(p => ns.fileExists(p, "home")).length;
-
 }
-
 /** Try to open ports + nuke if we have enough tools */
-
 function tryRoot(ns, host, portCrackers) {
-
     const requiredPorts = ns.getServerNumPortsRequired(host);
-
     if (requiredPorts > portCrackers) return;
-
     if (ns.fileExists("BruteSSH.exe", "home")) ns.brutessh(host);
-
     if (ns.fileExists("FTPCrack.exe", "home")) ns.ftpcrack(host);
-
     if (ns.fileExists("relaySMTP.exe", "home")) ns.relaysmtp(host);
-
     if (ns.fileExists("HTTPWorm.exe", "home")) ns.httpworm(host);
-
     if (ns.fileExists("SQLInject.exe", "home")) ns.sqlinject(host);
-
     try {
-
         ns.nuke(host);
-
     } catch {
-
         // if it fails, hasRootAccess will catch that
-
     }
-
 }
-
 /** "Best" target: maxMoney * growth / security with filters */
-
 function findBestTarget(ns) {
-
     const servers      = getAllServers(ns);
-
     const hackingLevel = ns.getHackingLevel();
-
     const portCrackers = countPortCrackers(ns);
-
     let bestTarget = null;
-
     let bestScore  = 0;
-
     for (const server of servers) {
-
         if (server === "home") continue;
-
         const maxMoney = ns.getServerMaxMoney(server);
-
         const minSec   = ns.getServerMinSecurityLevel(server);
-
         const growth   = ns.getServerGrowth(server);
-
         const reqHack  = ns.getServerRequiredHackingLevel(server);
-
         const reqPorts = ns.getServerNumPortsRequired(server);
-
         // Filters to avoid junk
-
         if (maxMoney <= 250_000) continue;
-
         if (growth < 10) continue;
-
         if (reqHack > hackingLevel) continue;
-
         if (reqPorts > portCrackers) continue;
-
         const score = (maxMoney * growth) / minSec;
-
         if (score > bestScore) {
-
             bestScore  = score;
-
             bestTarget = server;
-
         }
-
     }
-
     return bestTarget;
-
 }
-
 ```
 /* == END FILE == */
 
 /* == FILE: bin/tools/find.js == */
 ```js
 import { findPath } from '/lib/network.js';
-
 /** @param {NS} ns */
-
 export async function main(ns) {
-
     // Add --help without breaking positional usage
-
     const flags = ns.flags([
-
         ["help", false],
-
     ]);
-
     // Print help and exit immediately
-
     if (flags.help) {
-
         printHelp(ns);
-
         return;
-
     }
-
     // Script expects exactly one positional argument: target hostname
-
     if (flags._.length !== 1) {
-
         ns.tprint("Incorrect usage. See help below.\n");
-
         printHelp(ns);
-
         return;
-
     }
-
     const target = flags._[0];
-
     const start = "home";
-
     const path = await findPath(ns, target, start);
-
     if (path === null) {
-
         ns.tprint(`find: target "${target}" is not reachable from "${start}"`);
-
         return;
-
     }
-
     ns.tprint(`Path to ${target}:`);
-
     ns.tprint(path.join(" -> "));
-
 }
-
 function printHelp(ns) {
-
     ns.tprint("bin/find.js");
-
     ns.tprint("");
-
     ns.tprint("Description");
-
     ns.tprint("  Locate a host by name and print the navigation path from home.");
-
     ns.tprint("  Uses the BFS-based findPath() function from lib/network.js.");
-
     ns.tprint("");
-
     ns.tprint("Notes");
-
     ns.tprint("  Requires an exact hostname. Returns the path from home.");
-
     ns.tprint("  Positional arguments must contain exactly one target name.");
-
     ns.tprint("");
-
     ns.tprint("Syntax");
-
     ns.tprint("  run bin/find.js <hostname> [--help]");
-
 }
-
 ```
 /* == END FILE == */
 
@@ -8147,7 +6037,7 @@ function printHelp(ns) {
  *
  * **/
 //@param {NS} ns
- 
+
 export async function main(ns) {
     ns.disableLog("ALL");
 
@@ -8550,7 +6440,7 @@ function countPortCrackers(ns) {
  * network.js
  *
  * Functions for scanning and mapping the server network.
- * 
+ *
 */
 
 /**
@@ -8560,7 +6450,7 @@ function countPortCrackers(ns) {
  * @param {NS} ns
  * @param {Object} options
  * @param {string} [options.start='home']
- * @param {(host: string, ctx: {depth: number, parent: string | null}) 
+ * @param {(host: string, ctx: {depth: number, parent: string | null})
  *          => (void|boolean|Promise<void|boolean>)} options.visit
  *        If visit() returns true, traversal stops early.
  */
@@ -8703,7 +6593,7 @@ export async function findPath(ns, target, start = 'home') {
     return path.reverse();
 }
 
-/** 
+/**
  * Get all rooted servers.
  *
  * @param {NS} ns
@@ -9663,7 +7553,7 @@ export async function main(ns) {
 
         if (sec > minSec + 0.5) {
             await ns.weaken(target);
-        } 
+        }
         else if (money < maxMoney * 0.99) {
             await ns.grow(target);
         }
@@ -9679,730 +7569,374 @@ export async function main(ns) {
 /* == FILE: bin/tools/root-all.js == */
 ```js
 /** /bin/root-all.js
-
  *
-
  * Scan the network from "home" and attempt to gain root access on every
-
  * reachable server using whatever port crackers you own.
-
  *
-
  * This script:
-
  *   - Walks the entire network (DFS from "home")
-
  *   - Skips "home" itself
-
  *   - Checks your hacking level and port-cracker count
-
  *   - Attempts to open ports and nuke each eligible server
-
  *   - Prints a summary of newly rooted vs skipped servers
-
  *
-
  * Usage:
-
  *   run /bin/root-all.js
-
  *   run /bin/root-all.js --help
-
  *
-
  * @param {NS} ns
-
  */
-
 // ------------------------------------------------------------
-
 // Minimal HELP: Description, Notes, Syntax
-
 // ------------------------------------------------------------
-
 function printHelp(ns) {
-
     const script = "/bin/root-all.js";
-
     ns.tprint("==============================================================");
-
     ns.tprint(`HELP - ${script}`);
-
     ns.tprint("==============================================================");
-
     ns.tprint("");
-
     // DESCRIPTION
-
     ns.tprint("DESCRIPTION");
-
     ns.tprint("  Scans the network from 'home' and attempts to gain root access");
-
     ns.tprint("  on every reachable server using any port-cracking programs you");
-
     ns.tprint("  currently own.");
-
     ns.tprint("");
-
     ns.tprint("  For each server, it checks your hacking level and the number");
-
     ns.tprint("  of required ports, opens ports where possible, calls nuke(),");
-
     ns.tprint("  and prints a summary of what was rooted and what was skipped.");
-
     ns.tprint("");
-
     // NOTES
-
     ns.tprint("NOTES");
-
     ns.tprint("  - Does not touch 'home'.");
-
     ns.tprint("  - Safe to run multiple times; already-rooted servers are skipped.");
-
     ns.tprint("  - Uses your current hacking level and available port crackers at");
-
     ns.tprint("    the time of execution.");
-
     ns.tprint("  - This script only gains root access; it does not copy or deploy");
-
     ns.tprint("    any batch or botnet scripts.");
-
     ns.tprint("");
-
     // SYNTAX
-
     ns.tprint("SYNTAX");
-
     ns.tprint("  run /bin/root-all.js");
-
     ns.tprint("  run /bin/root-all.js --help");
-
     ns.tprint("");
-
     ns.tprint("==============================================================");
-
     ns.tprint("");
-
 }
-
 // ------------------------------------------------------------
-
 // Flag parser for this script
-
 // ------------------------------------------------------------
-
 function parseFlags(ns) {
-
     const flags = ns.flags([
-
         ["help", false],
-
     ]);
   if (flags.help) {
     printHelp(ns);
     return;
   }
-
     const positionals = flags._ || [];
-
     const wantsHelp = flags.help;
-
     return { flags, positionals, wantsHelp };
-
 }
-
 // ------------------------------------------------------------
-
 // MAIN
-
 // ------------------------------------------------------------
-
 /** @param {NS} ns */
-
 export async function main(ns) {
-
     ns.disableLog("ALL");
-
     const { wantsHelp } = parseFlags(ns);
-
     if (wantsHelp) {
-
         printHelp(ns);
-
         return;
-
     }
-
     const hackingLevel = ns.getHackingLevel();
-
     const portCrackers = getPortCrackerCount(ns);
-
     ns.tprint("ROOT-ALL: Starting network scan from 'home'...");
-
     ns.tprint(`ROOT-ALL: Hacking level: ${hackingLevel}`);
-
     ns.tprint(`ROOT-ALL: Port crackers available: ${portCrackers}`);
-
     const servers = getAllServers(ns);
-
     ns.tprint(`ROOT-ALL: Found ${servers.length} servers (including home).`);
-
     let rooted = 0;
-
     let skippedAlreadyRoot = 0;
-
     let skippedNotEnoughTools = 0;
-
     let skippedTooHighHack = 0;
-
     for (const host of servers) {
-
         if (host === "home") continue; // do not root home
-
         const hasRoot = ns.hasRootAccess(host);
-
         const reqHack = ns.getServerRequiredHackingLevel(host);
-
         const reqPorts = ns.getServerNumPortsRequired(host);
-
         if (hasRoot) {
-
             skippedAlreadyRoot++;
-
             ns.print(`Already rooted: ${host}`);
-
             continue;
-
         }
-
         // Hacking level check
-
         if (reqHack > hackingLevel) {
-
             skippedTooHighHack++;
-
             ns.print(`Skipping ${host} (required hacking ${reqHack} > ${hackingLevel})`);
-
             continue;
-
         }
-
         // Port tools check
-
         if (reqPorts > portCrackers) {
-
             skippedNotEnoughTools++;
-
             ns.print(`Skipping ${host} (needs ${reqPorts} ports, only ${portCrackers} tools)`);
-
             continue;
-
         }
-
         // Try to open ports and nuke
-
         tryOpenPorts(ns, host);
-
         try {
-
             ns.nuke(host);
-
         } catch (e) {
-
             ns.print(`Failed to nuke ${host}: ${String(e)}`);
-
             continue;
-
         }
-
         if (ns.hasRootAccess(host)) {
-
             rooted++;
-
             ns.tprint(`Rooted: ${host} (ports=${reqPorts}, reqHack=${reqHack})`);
-
         } else {
-
             ns.print(`Something went wrong, still no root on ${host}`);
-
         }
-
         await ns.sleep(10); // tiny yield to avoid lag
-
     }
-
     ns.tprint("========== Rooting Summary ==========");
-
     ns.tprint(`Newly rooted:        ${rooted}`);
-
     ns.tprint(`Already rooted:      ${skippedAlreadyRoot}`);
-
     ns.tprint(`Not enough tools:    ${skippedNotEnoughTools}`);
-
     ns.tprint(`Hack level too low:  ${skippedTooHighHack}`);
-
     ns.tprint("=====================================");
-
 }
-
 // ------------------------------------------------------------
-
 // Helpers
-
 // ------------------------------------------------------------
-
 /**
-
  * DFS to find all servers reachable from 'home'.
-
  */
-
 function getAllServers(ns) {
-
     const visited = new Set();
-
     const stack = ["home"];
-
     while (stack.length > 0) {
-
         const host = stack.pop();
-
         if (visited.has(host)) continue;
-
         visited.add(host);
-
         const neighbors = ns.scan(host);
-
         for (const n of neighbors) {
-
             if (!visited.has(n)) {
-
                 stack.push(n);
-
             }
-
         }
-
     }
-
     return Array.from(visited);
-
 }
-
 /**
-
  * Count how many port crackers we own.
-
  */
-
 function getPortCrackerCount(ns) {
-
     const tools = [
-
         "BruteSSH.exe",
-
         "FTPCrack.exe",
-
         "relaySMTP.exe",
-
         "HTTPWorm.exe",
-
         "SQLInject.exe",
-
     ];
-
     return tools.filter(t => ns.fileExists(t, "home")).length;
-
 }
-
 /**
-
  * Open all ports we can on a host.
-
  */
-
 function tryOpenPorts(ns, host) {
-
     if (ns.fileExists("BruteSSH.exe", "home")) ns.brutessh(host);
-
     if (ns.fileExists("FTPCrack.exe", "home")) ns.ftpcrack(host);
-
     if (ns.fileExists("relaySMTP.exe", "home")) ns.relaysmtp(host);
-
     if (ns.fileExists("HTTPWorm.exe", "home")) ns.httpworm(host);
-
     if (ns.fileExists("SQLInject.exe", "home")) ns.sqlinject(host);
-
 }
-
 ```
 /* == END FILE == */
 
 /* == FILE: bin/tools/root-and-deploy.js == */
 ```js
 /** /bin/root-and-deploy.js
-
  * Scan the network, gain root where possible, and prep servers for batch usage.
-
  *
-
  * ?? Does NOT deploy or start swarm/HGW workers (botnet/remote-hgw.js, /bin/botnet-hgw-sync.js).
-
  * ?? Safe to run multiple times; it only (re)roots and copies scripts.
-
  *
-
  * Usage:
-
  *   run /bin/root-and-deploy.js
-
  *   run /bin/root-and-deploy.js joesguns   // optional arg, currently informational only
-
  *   run /bin/root-and-deploy.js --help     // show description/notes/syntax
-
  *
-
  * @param {NS} ns
-
  */
-
 // ------------------------------------------------------------
-
 // HELP + FLAG PARSING
-
 // ------------------------------------------------------------
-
 /**
-
  * Minimal help: Description, Notes, Syntax.
-
  * @param {NS} ns
-
  */
-
 function printHelp(ns) {
-
     const script = "/bin/root-and-deploy.js";
-
     ns.tprint("==============================================================");
-
     ns.tprint(`   HELP - ${script}`);
-
     ns.tprint("==============================================================\n");
-
     // DESCRIPTION
-
     ns.tprint("DESCRIPTION");
-
     ns.tprint("  Scan the network from 'home', gain root on servers when possible,");
-
     ns.tprint("  and copy batch infrastructure scripts to rooted hosts with RAM.");
-
     ns.tprint("  This prepares the network for HWGW batchers without actually");
-
     ns.tprint("  starting any swarm/HGW worker scripts.");
-
     ns.tprint("");
-
     // NOTES
-
     ns.tprint("NOTES");
-
     ns.tprint("  - Does NOT start botnet/remote-hgw.js or /bin/botnet-hgw-sync.js.");
-
     ns.tprint("  - Safe to run repeatedly; it only (re)roots and copies scripts.");
-
     ns.tprint("  - Respects your hacking level and available port crackers.");
-
     ns.tprint("  - Only copies batch scripts to servers with at least 2GB RAM.");
-
     ns.tprint("  - The optional [target] argument is currently informational only");
-
     ns.tprint("    and does not change behavior.");
-
     ns.tprint("");
-
     // SYNTAX
-
     ns.tprint("SYNTAX");
-
     ns.tprint("  run /bin/root-and-deploy.js");
-
     ns.tprint("  run /bin/root-and-deploy.js [target]");
-
     ns.tprint("  run /bin/root-and-deploy.js --help   # show this help");
-
     ns.tprint("");
-
     ns.tprint("==============================================================\n");
-
 }
-
 /**
-
  * Simple flag parser for this script.
-
  * - Supports: --help and -? (both show help and exit).
-
  * - Returns positionals separately.
-
  *
-
  * @param {NS} ns
-
  */
-
 function parseFlags(ns) {
-
     const raw = [...ns.args];
-
     const flags = ns.flags([
-
         ["help", false],
-
     ]);
   if (flags.help) {
     printHelp(ns);
     return;
   }
-
     const positionals = flags._ || [];
-
     const wantsHelp = flags.help || raw.includes("-?");
-
     return { flags, positionals, wantsHelp };
-
 }
-
 // ------------------------------------------------------------
-
 // MAIN
-
 // ------------------------------------------------------------
-
 export async function main(ns) {
-
     ns.disableLog("ALL");
-
     const { positionals, wantsHelp } = parseFlags(ns);
-
     if (wantsHelp) {
-
         printHelp(ns);
-
         return; // do not run normal behavior
-
     }
-
     // Original positional arg behavior preserved:
-
     //   manualTarget = first positional, or null if none provided.
-
     const manualTarget = positionals[0] || null;
-
     const hackingLevel = ns.getHackingLevel();
-
     const portCrackers = countPortCrackers(ns);
-
     ns.tprint("?? ROOT-AND-DEPLOY: scanning network from 'home'...");
-
     ns.tprint(`?? Hacking level: ${hackingLevel}`);
-
     ns.tprint(`?? Port crackers: ${portCrackers}`);
-
     if (manualTarget) {
-
         ns.tprint(`?? Manual target (informational only): ${manualTarget}`);
-
     }
-
     const servers = getAllServers(ns);
-
     const pservs = new Set(ns.getPurchasedServers());
-
     let rooted = 0;
-
     let total = 0;
-
     // Scripts we may want present on remote hosts (batch infrastructure only)
-
     const batchScripts = [
-
         "batch-hack.js",
-
         "workers/hwgw/batch-grow.js",
-
         "workers/hwgw/batch-weaken.js",
-
     ];
-
     for (const host of servers) {
-
         if (host === "home") continue;
-
         if (host === "darkweb") continue;
-
         total++;
-
         const hadRootBefore = ns.hasRootAccess(host);
-
         const nowHasRoot = tryRoot(ns, host, hackingLevel, portCrackers);
-
         if (!hadRootBefore && nowHasRoot) rooted++;
-
         // Only bother copying scripts to machines where we have RAM + root
-
         if (!nowHasRoot) continue;
-
         const maxRam = ns.getServerMaxRam(host);
-
         if (maxRam < 2) {
-
             ns.print(`?? Skipping ${host}: only ${maxRam}GB RAM`);
-
             continue;
-
         }
-
         // Copy batch-only scripts; swarm scripts are managed by /bin/botnet-hgw-sync.js
-
         await ns.scp(batchScripts, host, "home");
-
         ns.print(`?? Deployed batch scripts to ${host} (RAM=${maxRam}GB)`);
-
     }
-
     ns.tprint("? ROOT-AND-DEPLOY COMPLETE");
-
     ns.tprint(`   Scanned: ${total} non-home servers`);
-
     ns.tprint(`   Newly rooted: ${rooted}`);
-
 }
-
 /**
-
  * Try to gain root on a server using available port crackers and Nuke.
-
  * Returns true if the server is rooted after this call.
-
  *
-
  * @param {NS} ns
-
  * @param {string} host
-
  * @param {number} hackingLevel
-
  * @param {number} portCrackers
-
  */
-
 function tryRoot(ns, host, hackingLevel, portCrackers) {
-
     if (ns.hasRootAccess(host)) return true;
-
     const requiredHack = ns.getServerRequiredHackingLevel(host);
-
     const requiredPorts = ns.getServerNumPortsRequired(host);
-
     // Can't meet requirements yet
-
     if (requiredHack > hackingLevel) return false;
-
     if (requiredPorts > portCrackers) return false;
-
     // Open all ports we can
-
     if (ns.fileExists("BruteSSH.exe", "home")) ns.brutessh(host);
-
     if (ns.fileExists("FTPCrack.exe", "home")) ns.ftpcrack(host);
-
     if (ns.fileExists("relaySMTP.exe", "home")) ns.relaysmtp(host);
-
     if (ns.fileExists("HTTPWorm.exe", "home")) ns.httpworm(host);
-
     if (ns.fileExists("SQLInject.exe", "home")) ns.sqlinject(host);
-
     // Try to nuke
-
     try {
-
         ns.nuke(host);
-
     } catch {
-
         // if nuke fails for any reason, just fall through
-
     }
-
     return ns.hasRootAccess(host);
-
 }
-
 /**
-
  * Count how many port cracking programs we have.
-
  * @param {NS} ns
-
  */
-
 function countPortCrackers(ns) {
-
     const programs = [
-
         "BruteSSH.exe",
-
         "FTPCrack.exe",
-
         "relaySMTP.exe",
-
         "HTTPWorm.exe",
-
         "SQLInject.exe",
-
     ];
-
     return programs.filter(p => ns.fileExists(p, "home")).length;
-
 }
-
 /**
-
  * Simple BFS to discover all servers reachable from "home".
-
  * @param {NS} ns
-
  */
-
 function getAllServers(ns) {
-
     const visited = new Set();
-
     const queue = ["home"];
-
     while (queue.length > 0) {
-
         const host = queue.shift();
-
         if (visited.has(host)) continue;
-
         visited.add(host);
-
         for (const h of ns.scan(host)) {
-
             if (!visited.has(h)) queue.push(h);
-
         }
-
     }
-
     return Array.from(visited);
-
 }
-
 ```
 /* == END FILE == */
 
@@ -19276,4 +16810,3 @@ function printHelp(ns) {
 }
 ```
 /* == END FILE == */
-
