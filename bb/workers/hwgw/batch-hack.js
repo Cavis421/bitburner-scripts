@@ -36,7 +36,6 @@ export async function main(ns) {
     if (drift > 1) await ns.sleep(drift);
 }
 
-
 function printHelp(ns) {
     ns.tprint("workers/hwgw/batch-hack.js");
     ns.tprint("");

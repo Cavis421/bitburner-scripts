@@ -269,4 +269,3 @@ function printHelp(ns) {
     ns.tprint("");
 }
 
-

@@ -149,7 +149,6 @@ export async function main(ns) {
     ns.tprint("\n? Dashboard snapshot complete.");
 }
 
-
 /* ---------------- BOTNET STATUS ---------------- */
 
 function getAllServers(ns) {
@@ -250,7 +249,6 @@ function printBotnetStatus(ns, guessedTarget) {
     ns.tprint("------------------------------------------------------------");
 }
 
-
 /* ---------------- PSERV STATUS ---------------- */
 
 function printPservStatus(ns) {
@@ -301,7 +299,6 @@ function printPservStatus(ns) {
     ns.tprint(`Total HGW threads: ${totalThreads}`);
     ns.tprint("------------------------------------------------------------");
 }
-
 
 /* ---------------- HACKNET STATUS ---------------- */
 

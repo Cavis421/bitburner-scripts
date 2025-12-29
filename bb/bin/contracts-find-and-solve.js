@@ -1,6 +1,5 @@
-import { solvers } from "lib/solvers.js";
+﻿import { solvers } from "lib/solvers.js";
 const disabledTypes = new Set();
-
 
 /**
  * bin/find-and-solve.js

@@ -1,6 +1,5 @@
 ﻿/** @param {NS} ns */
 
-
 /*
  * /bin/bootstrap.js
  *
@@ -189,5 +188,4 @@ function printHelp(ns) {
   ns.tprint("  run /bin/bootstrap.js --stopEarly false");
   ns.tprint("  run /bin/bootstrap.js --help");
 }
-
 

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * augs.js  (9.35GB)  v1.0.2
  *
  * Sources:
@@ -83,7 +83,6 @@ import * as ANSI from "./ANSICodes";
  **/
 /* -- End of ANSICodes types section -- */
 
-
 /**
  * @param {NS} ns
  **/
@@ -109,7 +108,6 @@ export async function main(ns) {
 		}
 		return txt;
 	}
-
 
 	/* Main code */
 	const valDR  = { true: "", false: ansi.TxtRed };

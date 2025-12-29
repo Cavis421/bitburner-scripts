@@ -1,4 +1,4 @@
-/* == FILE: bin/tools/os-status.js == */
+﻿/* == FILE: bin/tools/os-status.js == */
 /** @param {NS} ns */
 /*
  * /bin/tools/os-status.js
@@ -36,7 +36,6 @@ const FLAGS = [
   ["interval", 1500],   // ms refresh when not --once
   ["compact", true],     // one-line status (default)
   ["verbose", false],    // force full dashboard
-
 
   // Scope
   ["host", "home"],
@@ -108,9 +107,9 @@ function renderCompact(ns, flags) {
     const isRunning = running.has(script);
 
     const icon =
-      !isEnabled ? "✖" :
-      isRunning ? "✔" :
-      "…";
+      !isEnabled ? "âœ–" :
+      isRunning ? "âœ”" :
+      "â€¦";
 
     parts.push(`${icon} ${svc.key}`);
   }
@@ -131,7 +130,6 @@ function renderCompact(ns, flags) {
   );
 }
 
-
 function buildScriptVariants(scriptWithSlash) {
   const s = String(scriptWithSlash || "").trim().replaceAll("\\", "/");
   const set = new Set();
@@ -148,7 +146,7 @@ function formatArgs(args, maxArgs) {
   if (!args || args.length === 0) return "[]";
   const a = args.map((x) => String(x));
   if (maxArgs > 0 && a.length > maxArgs) {
-    return `[${a.slice(0, maxArgs).join(", ")}, …(+${a.length - maxArgs})]`;
+    return `[${a.slice(0, maxArgs).join(", ")}, â€¦(+${a.length - maxArgs})]`;
   }
   return `[${a.join(", ")}]`;
 }

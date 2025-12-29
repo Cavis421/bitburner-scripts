@@ -1,6 +1,5 @@
 ﻿/** @param {NS} ns */
 
-
 /*
  * /bin/darkweb-auto-buyer.js
  *
