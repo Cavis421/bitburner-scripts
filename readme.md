@@ -1,292 +1,115 @@
-# ⚡ Bitburner Scripts — Modular, Automated, Endgame-Ready Framework
+# Bitburner Scripts – Master Codebase
 
-This repository contains a fully modular, production-grade automation framework for **Bitburner**.  
-It manages **startup**, **batching**, **botnet HGW**, **Hacknet automation**, **server orchestration**, and **UI dashboards** in a unified, scalable architecture.
+This repository contains my **production Bitburner codebase**, structured and maintained for long-running playthroughs, automation, and iterative refactors.
 
-Designed for mid–late game and BitNode resets, this framework allows you to start from a completely clean save and bootstrap to endgame automation with a single command.
-
----
-
-# 📁 Repository Structure
-
-Your local repo is structured into clean, category-based directories:
-
-bitburner-scripts/
-│
-├── batch/ # HGW batch workers + timed batch controllers
-├── botnet/ # Distributed HGW engine, swarm deployment, syncing
-├── core/ # Startup, network deployment, batch controllers
-├── corp/ # Corporation automation (BN3 and beyond)
-├── darkweb/ # Dark web utilities and buyers
-├── hacknet/ # Hacknet node automation and dashboards
-├── pserv/ # Purchased server management tools
-├── ui/ # UI dashboards and monitoring tools
-├── util/ # Scanners, analysis tools, formulas helpers
-└── Bitburner_Master_Codebase.md # Flattened single-file codebase
-
-markdown
-Copy code
-
-Each folder contains scripts with a tightly defined purpose, mirroring the in-game pseudo-filesystem introduced by the refactor.
+**Source of truth:** everything under `bb/`
+If it isn’t in `bb/`, it does **not** exist in the game.
 
 ---
 
-## 📂 `core/` — Startup & Orchestration
+## Repository Structure
 
-Contains all scripts responsible for **bootstrapping and managing** your entire hacking infrastructure.
-
-Key scripts:
-
-- `startup-home-advanced.js` – One-button full boot sequence  
-- `startup-home.js` – Lightweight bootstrap  
-- `early-backdoor-helper.js` – Auto-find backdoor targets  
-- `deploy-net.js` – Recursive server deployment  
-- `root-all.js` / `root-and-deploy.js` – Rooting utilities  
-- `timed-net-batcher.js` / `timed-net-batcher2.js` – Main batching controllers  
-
-This subsystem performs:
-
-- Full network scan  
-- Auto rooting  
-- Swarm deployment  
-- Batch scheduler initialization  
-- Dashboard/UI service startup  
-- Early BitNode bootstrap  
+/  
+├─ bb/                     (Bitburner in-game filesystem – ONLY synced content)  
+│  ├─ bin/                 Entry points, daemons, controllers  
+│  ├─ lib/                 Shared libraries and logic lanes  
+│  ├─ workers/             Stateless worker scripts (HGW, batch pieces, etc.)  
+│  ├─ apps/                Feature-specific tools (WSE, Hacknet, etc.)  
+│  └─ ui/                  Terminal / tail / dashboard UIs  
+│  
+├─ README.md               This file  
+├─ .gitignore              Whitelist-based (tracks bb/ only)  
+└─ tooling / docs / scripts (ignored by git)
 
 ---
 
-## 📂 `batch/` — Worker Scripts & Batch Engines
+## Design Principles
 
-Implements the core HGW batching logic.
+- **Single root of truth**  
+  `bb/` mirrors the Bitburner home filesystem exactly.
 
-Includes:
+- **Explicit automation lanes**  
+  Hacking, Hacknet, Singularity, Gang, Player, WSE, and OS-style services are separated into focused lanes.
 
-- `batch-hack.js`, `batch-grow.js`, `batch-weaken.js`  
-- `hack-worker.js`, `grow-worker.js`, `weaken-worker.js`  
-- `timed-net-batcher.js`, `timed-net-batcher2.js`  
-- `net-hwgw-batcher.js`  
+- **Controller-driven orchestration**  
+  One main controller coordinates RAM-gated daemons, jobs, and policies.
 
-Features:
+- **Restart-safe**  
+  Designed to survive BitNode resets, script restarts, and partial availability.
 
-- Balanced worker dispatch  
-- Batching pipeline orchestration  
-- Timed gap execution  
-- Multi-host synchronized workers  
-- Support for XP and money modes  
+- **Refactor-friendly**  
+  Large restructures are expected; tooling and layout are built to tolerate churn.
 
 ---
 
-## 📂 `botnet/` — Distributed HGW Network
+## Getting Started (In-Game)
 
-Controls the distributed hacking swarm across **home**, **pservs**, and **NPC servers**.
+Typical entry flow after installing scripts:
 
-Includes:
+run /bin/bootstrap.js
 
-- `remote-hgw.js` — Remote HGW worker  
-- `home-hgw-manager.js` — Home execution orchestrator  
-- `pserv-hgw-sync.js` — Sync controller for purchased servers  
-- `botnet-hgw-sync.js`, `botnet-hgw-status.js`  
-- `deploy-hgw-swarm.js` — Deploy entire HGW network  
-- `auto-hgw.js` — Quick-start HGW dispatcher  
+This:
+- waits for sufficient free RAM
+- runs lightweight early daemons
+- launches the main controller when affordable
 
-Supports:
-
-- Thread load balancing  
-- Auto-scaling with server upgrades  
-- Dynamic target switching  
-- Swarm-wide synchronization  
+You can also start components directly if desired.
 
 ---
 
-## 📂 `hacknet/` — Automated Node Management
+## Syncing With the Game
 
-Complete Hacknet fleet automation.
+This repo is intended to be synced using the Bitburner Remote API and a filesystem sync tool.
 
-Scripts include:
+Important rules:
+- Only `bb/` is synced
+- Deletes and moves must be reflected in `bb/`
+- Tooling, archives, docs, and experiments live outside `bb/`
 
-- `hacknet-smart.js` — ROI-driven purchasing & upgrading  
-- `hacknet-manager.js` — Continuous optimization loop  
-- `hacknet-status.js` — Dashboard  
-- Purchase helpers  
-
-Handles:
-
-- Optimal upgrade ordering  
-- Value-per-dollar analysis  
-- Full passive-income automation  
+For large refactors:
+1. Stop filesync
+2. Restructure files
+3. Restart filesync with a full push
 
 ---
 
-## 📂 `pserv/` — Purchased Server Management
+## Master Codebase Document
 
-Responsible for:
+A full, flattened snapshot of the entire in-game codebase is auto-generated as:
 
-- Server purchase/upgrade  
-- Fleet summary dashboards  
-- Cleanup & recycling  
+Bitburner_Master_Codebase_v3.md
 
-Key scripts:
+This file:
+- lists every script
+- embeds full source contents
+- is suitable for review, audits, or offline reference
 
-- `pserv-manager.js`  
-- `pserv-status.js`  
-- `pserv-process-report.js`  
-- `purchase_server_8gb.js`  
-- `clean-pservs.js`  
+It is generated, not edited by hand.
 
 ---
 
-## 📂 `ui/` — Dashboards & Live Monitoring
+## Tooling & Scripts (Out of Scope)
 
-Graphical (terminal-based) monitoring tools.
+PowerShell scripts, generators, archives, experiments, and historical code intentionally live outside `bb/` and are not tracked by git.
 
-Includes:
-
-- `ops-dashboard.js` — Global op status  
-- `process-monitor.js` — Live process/watchdog  
-- `xp-throughput-monitor.js` — XP/sec tracking  
-- `karma-watch.js` — Faction/karma grinding helper  
+This is by design.
 
 ---
 
-## 📂 `util/` — Analysis, Helpers & Scanners
+## Notes & Warnings
 
-Utility scripts for data modeling and analysis.
-
-Includes:
-
-- `find-juicy-target.js` / `find-juicy-advanced.js`  
-- `formulas-helper.js`  
-- `prep-target.js`  
-- `xp-to-next-level.js`  
-- `whats-my-bitNode.js`  
-- `hacktemplate.txt`  
-
-Handles:
-
-- Target selection  
-- Server prep calculations  
-- Formulas.exe integration  
-- XP projections  
+- Paths in scripts assume Bitburner-style absolute paths (/bin/...)
+- Many scripts require Singularity or specific Source Files
+- Some automation (WSE, shorting, corp) is BN-dependent
+- This codebase favors clarity and correctness over minimal RAM
 
 ---
 
-# 📦 `Bitburner_Master_Codebase.md`
+## Philosophy
 
-This file is a **flattened, single-file version of the entire codebase**, used for:
+Treat Bitburner like an operating system, not a script pile.
 
-- Importing into in-game editor  
-- Sharing combined builds  
-- Quick copying into Bitburner  
-- Debugging Netscript execution order  
+This repo reflects that mindset.
 
-Automatic tools can reconstruct the original folder layout from this file.
-
----
-
-# 🚀 Running the Framework In-Game
-
-Once synced (via filesync or manual upload):
-
-### Start full automation:
-
-```sh
-run core/startup-home-advanced.js
-Deploy entire HGW swarm:
-sh
-Copy code
-run botnet/deploy-hgw-swarm.js
-Begin XP grinding mode:
-sh
-Copy code
-run botnet/xp-all.js
-Root everything:
-sh
-Copy code
-run core/root-all.js
-Monitor operations:
-sh
-Copy code
-run ui/process-monitor.js
-🧪 Recommended Development Workflow
-Edit scripts locally (VS Code)
-
-Auto-sync via bitburner-filesync
-
-Export/update Bitburner_Master_Codebase.md when needed
-
-Launch automation using startup-home-advanced.js
-
-Monitor using UI dashboards
-
-Iterate & refine
-
-🛠 Requirements
-Bitburner (Steam or browser)
-
-Remote API enabled
-
-bitburner-filesync (recommended)
-
-Node.js (for filesync & tooling)
-
-📜 License
-MIT License — free to use, modify, and distribute.
-
-🤖 Contributions / Pull Requests
-PRs and suggestions are welcome!
-If you have improvements to batching logic, HGW scheduling, Hacknet math, or server orchestration, feel free to contribute.
-
-<!-- BIN-INDEX:START -->
-(Generated file: docs/bin-index.md)
-
-# /bin Command Index
-
-> Auto-generated from printHelp(ns). Do not hand-edit.
-
-Generated: 2025-12-26 22:17:42
-
-## General
-
-| Command | Summary | Usage |
-|---|---|---|
-| /./bin/backdoor-oneshot.js | One-shot backdoor installer. Discovers all servers reachable from home, then: | Usage: |
-| /./bin/basic-trader.js | /bin/basic-trader.js |  |
-| /./bin/bootstrap.js | /bin/bootstrap.js |  |
-| /./bin/botnet-hgw-sync.js | /bin/botnet-hgw-sync.js |  |
-| /./bin/controller.js | //bin/controller.js |  |
-| /./bin/corp-daemon.js | /bin/corp-daemon.js | run /bin/corp-daemon.js [--tickMs <ms>] [--debug] [--resetState] [--once] |
-| /./bin/darkweb-auto-buyer.js | /bin/darkweb-auto-buyer.js |  |
-| /./bin/deploy-net.js | HELP - ${script} |  |
-| /./bin/early-backdoor-helper.js | HELP - ${script} |  |
-| /./bin/early-batcher.js | HELP - ${script} |  |
-| /./bin/find.js | bin/find.js |  |
-| /./bin/gang-manager.js | Adaptive COMBAT gang automation (slightly aggressive). | Usage: |
-| /./bin/net-hwgw-batcher.js | HELP - ${script} |  |
-| /./bin/pserv-manager.js | HELP - ${script} |  |
-| /./bin/root-all.js | HELP - ${script} |  |
-| /./bin/root-and-deploy.js | HELP - ${script} |  |
-| /./bin/startup-home-advanced.js | /bin/startup-home-advanced.js |  |
-| /./bin/timed-net-batcher.js | /bin/timed-net-batcher.js |  |
-| /./bin/timed-net-batcher2.js | HELP - ${script} |  |
-| /./bin/tools/augs.js | Faction tests |  |
-| /./bin/tools/connect-path.js | connect-path.js | run connect-path.js <server> |
-| /./bin/tools/find-juicy-advanced.js | @param {NS} ns |  |
-| /./bin/tools/find-juicy-target.js | Skip servers that are obviously trash or out of reach |  |
-| /./bin/tools/prep-target.js |  |  |
-| /./bin/tools/target-status.js |  |  |
-| /./bin/tools/xp-target-compare.js | bin/tools/xp-target-compare.js |  |
-| /./bin/tools/xp-to-next-level.js | Derive effective multiplier so XP thresholds match your displayed level. |  |
-| /./bin/ui/gang-ui.js | Always-on gang dashboard (live tail). | Usage: |
-| /./bin/ui/hacknet-ui.js | --------------------------------------------------------------------------- |  |
-| /./bin/ui/karma-watch.js | "Secret" karma function (now semi-documented) |  |
-| /./bin/ui/money-tracker.js | Starting snapshot |  |
-| /./bin/ui/network-visualizer.js | Build children lists: parent -> [children] |  |
-| /./bin/ui/ops-dashboard.js | Normalize to "ideal" batch conditions |  |
-| /./bin/ui/process-monitor.js | ------------------------------------------------------------- |  |
-| /./bin/ui/territory-ui.js | Always-on territory dashboard for gangs. | Usage: |
-| /./bin/ui/timed-net-batcher-ui.js | Worker script names (match your batcher) |  |
-| /./bin/ui/xp-throughput-monitor.js | Flags: |  |
-
-
-<!-- BIN-INDEX:END -->
+Happy hacking.
 
