@@ -54,8 +54,8 @@ const FLAGS = [
   // Targeting
   ["hgwMode", "money"],        // money | xp
   ["batchTarget", ""],         // optional override (skip scoring)
-  ["retarget", false],         // periodically re-score targets
-  ["retargetEvery", 15 * 60 * 1000], // ms between re-score when --retarget true
+  ["retarget", true],         // periodically re-score targets
+  ["retargetEvery", 15 * 60 * 1000], // ms (m * s * ms) between re-score when --retarget true
   ["scoringVerbose", false],   // print scoring tables when retargeting
 
   // (Optional) restart managed daemons on retarget
@@ -352,7 +352,6 @@ function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
     pserv: !!effective.pserv,
     trader: !!effective.trader,
     gangManager: !!effective.gangManager,
-    intTrainer: !!effective.intTrainer,
     darkwebBuyer: !!effective.darkwebBuyer,
     bladeburnerManager: !!effective.bladeburnerManager, // NEW
     backdoorJob: !!effective.backdoorJob,
