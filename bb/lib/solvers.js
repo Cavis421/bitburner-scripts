@@ -772,4 +772,44 @@ solvers["Compression III: LZ Compression"] = (data) => {
     }
 
     return parts.join("");
+
+
+};
+
+// ---------------------------------------------------------------------------
+// Square Root (BigInt)
+// ---------------------------------------------------------------------------
+// Given ~200-digit BigInt N, return sqrt(N) rounded to the nearest integer (as a string, no trailing "n").
+solvers["Square Root"] = (data) => {
+    // Normalize input -> BigInt
+    let n;
+    if (typeof data === "bigint") {
+        n = data;
+    } else {
+        const s = String(data).trim();
+        n = BigInt(s.endsWith("n") ? s.slice(0, -1) : s);
+    }
+
+    if (n < 0n) return ""; // not expected, but safe
+    if (n < 2n) return n.toString();
+
+    // Integer sqrt floor via Newton's method
+    let x = n;
+    let y = (x + 1n) >> 1n;
+    while (y < x) {
+        x = y;
+        y = (x + n / x) >> 1n;
+    }
+    const floor = x;
+
+    // Round to nearest integer: compare distances to floor^2 and (floor+1)^2
+    const up = floor + 1n;
+    const floorSq = floor * floor;
+    const upSq = up * up;
+
+    const downDiff = n >= floorSq ? (n - floorSq) : (floorSq - n);
+    const upDiff = upSq >= n ? (upSq - n) : (n - upSq);
+
+    // If tie, choose floor (stable)
+    return (upDiff < downDiff ? up : floor).toString();
 };
