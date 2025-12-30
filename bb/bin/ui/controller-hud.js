@@ -91,7 +91,14 @@ export async function main(ns) {
         cashTrend.sample();
         netWorthTrend.sample();
 
-        renderReport(ns, flags, cashTrend, netWorthTrend);
+        // Safety net: one bad section shouldn't kill the whole HUD
+        try {
+            renderReport(ns, flags, cashTrend, netWorthTrend);
+        } catch (e) {
+            ns.print("=================================================================");
+            ns.print(`[controller-hud] WARN render error: ${String(e)}`);
+            ns.print("=================================================================");
+        }
 
         if (flags.once) return;
         await ns.sleep(interval);
@@ -298,17 +305,30 @@ function getTargetStats(ns, target) {
 }
 
 // -----------------------------------------------------------------------------
-// 3) WSE assets (compact)
+// 3) WSE assets (compact)  [FIXED: WSE gating + safe calls]
 // -----------------------------------------------------------------------------
 function renderWseAssetsSection(ns) {
     ns.print("== WSE Assets ==");
-    if (!ns.stock || typeof ns.stock.getSymbols !== "function") {
+
+    if (!ns.stock) {
         ns.print("  Status: (Stock API not available)");
         return;
     }
 
+    // Real gate: WSE account. Without it, many ns.stock calls throw.
+    if (!hasWseAccount(ns)) {
+        ns.print("  Status: locked (no WSE account)");
+        return;
+    }
+
     const cash = ns.getServerMoneyAvailable("home");
-    const symbols = ns.stock.getSymbols();
+    const symbols = safeStock(() => ns.stock.getSymbols(), []);
+
+    if (!symbols.length) {
+        ns.print(`  Cash:        ${fmtMoney(ns, cash)}`);
+        ns.print("  Status:      (no symbols / unable to read portfolio)");
+        return;
+    }
 
     const bidFn = ns.stock.getBidPrice ?? ns.stock.getStockBidPrice;
     const askFn = ns.stock.getAskPrice ?? ns.stock.getStockAskPrice;
@@ -318,11 +338,15 @@ function renderWseAssetsSection(ns) {
     let shortCloseCost = 0;
 
     for (const sym of symbols) {
-        const price = ns.stock.getPrice(sym);
-        const bid = typeof bidFn === "function" ? bidFn(sym) : null;
-        const ask = typeof askFn === "function" ? askFn(sym) : null;
+        const price = safeStock(() => ns.stock.getPrice(sym), NaN);
+        if (!Number.isFinite(price)) continue;
 
-        const [longShares, , shortShares] = ns.stock.getPosition(sym);
+        const bid = typeof bidFn === "function" ? safeStock(() => bidFn(sym), null) : null;
+        const ask = typeof askFn === "function" ? safeStock(() => askFn(sym), null) : null;
+
+        const pos = safeStock(() => ns.stock.getPosition(sym), null);
+        const longShares = Number(pos?.[0] ?? 0);
+        const shortShares = Number(pos?.[2] ?? 0);
 
         if (longShares > 0) {
             longMarket += longShares * price;
@@ -357,13 +381,19 @@ function renderGangOrKarmaSection(ns) {
         return;
     }
 
-    const g = ns.gang.getGangInformation();
+    const g = safeObj(() => ns.gang.getGangInformation(), null);
+    if (!g) {
+        ns.print("  Status: (gang info unavailable)");
+        return;
+    }
+
     const type = g.isHacking ? "HACKING" : "COMBAT";
 
     const members = safeArr(() => ns.gang.getMemberNames(), []);
     const tasks = new Map();
     for (const m of members) {
-        const mi = ns.gang.getMemberInformation(m);
+        const mi = safeObj(() => ns.gang.getMemberInformation(m), null);
+        if (!mi) continue;
         const t = String(mi.task || "Unassigned");
         tasks.set(t, (tasks.get(t) || 0) + 1);
     }
@@ -642,12 +672,15 @@ function readXpThroughput(ns, file) {
 }
 
 // Compute net liquidation value (cash + long liquidation - short close)
-// Returns null if Stock API is not available.
+// Returns null if Stock API is not available / accessible.
+// [FIXED: WSE gating + safe calls]
 function computeNetLiquidation(ns) {
-    if (!ns.stock || typeof ns.stock.getSymbols !== "function") return null;
+    if (!ns.stock) return null;
+    if (!hasWseAccount(ns)) return null;
 
     const cash = ns.getServerMoneyAvailable("home");
-    const symbols = ns.stock.getSymbols();
+    const symbols = safeStock(() => ns.stock.getSymbols(), []);
+    if (!symbols.length) return cash;
 
     const bidFn = ns.stock.getBidPrice ?? ns.stock.getStockBidPrice;
     const askFn = ns.stock.getAskPrice ?? ns.stock.getStockAskPrice;
@@ -656,11 +689,15 @@ function computeNetLiquidation(ns) {
     let shortCloseCost = 0;
 
     for (const sym of symbols) {
-        const price = ns.stock.getPrice(sym);
-        const bid = typeof bidFn === "function" ? bidFn(sym) : null;
-        const ask = typeof askFn === "function" ? askFn(sym) : null;
+        const price = safeStock(() => ns.stock.getPrice(sym), NaN);
+        if (!Number.isFinite(price)) continue;
 
-        const [longShares, , shortShares] = ns.stock.getPosition(sym);
+        const bid = typeof bidFn === "function" ? safeStock(() => bidFn(sym), null) : null;
+        const ask = typeof askFn === "function" ? safeStock(() => askFn(sym), null) : null;
+
+        const pos = safeStock(() => ns.stock.getPosition(sym), null);
+        const longShares = Number(pos?.[0] ?? 0);
+        const shortShares = Number(pos?.[2] ?? 0);
 
         if (longShares > 0) {
             longLiquidation += longShares * (bid ?? price);
@@ -728,6 +765,17 @@ function safeStr(fn, fallback) {
         const v = fn();
         return (v === null || v === undefined) ? fallback : String(v);
     } catch { return fallback; }
+}
+
+// -------------------------------
+// Stock access helpers (WSE gating)
+// -------------------------------
+function hasWseAccount(ns) {
+    if (!ns.stock) return false;
+    return safeBool(() => typeof ns.stock.hasWSEAccount === "function" && ns.stock.hasWSEAccount(), false);
+}
+function safeStock(fn, fallback = null) {
+    try { return fn(); } catch { return fallback; }
 }
 
 
