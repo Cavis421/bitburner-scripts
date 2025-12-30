@@ -2,13 +2,21 @@
 /*
  * lib/player-policy.js
  *
- * UPDATED POLICY (FIXED):
- *  - Bootstrap on restart: while hacking < threshold, take FREE "Computer Science" at Rothman University (Sector-12).
- *  - Once hacking >= threshold: if bootstrap was active, immediately fall through to normal policy (crime-first, etc).
- *  - Safety / Recovery: if cash < minCashFloor, do CRIME FIRST (never paid gym/class).
- *  - Pre-gang: choose best crime meeting minChance; if none meets it, train lowest combat stat
- *              BUT ONLY if cash >= gymCashFloor; otherwise crime anyway.
- *  - Post-gang: do faction rep work for preferred factions (unless broke -> crime).
+ * SINGLE SOURCE OF TRUTH policy (hour-sliced):
+ *
+ * 1) Hacking 1-30: study "Computer Science" (bootstrap)
+ * 2) Hacking >= 30, pre-gang:
+ *    - Minute 00-09: INT slice (create missing programs else study)
+ *    - Minute 50-59: faction rep work
+ *    - Otherwise: crime logic
+ * 3) In gang:
+ *    - Minute 00-09: INT slice (same)
+ *    - Otherwise: faction rep work
+ * 4) If in Daedalus: prioritize Daedalus faction rep whenever doing faction work
+ *
+ * IMPORTANT:
+ * - This policy assumes you DISABLE the separate bin/intelligence-trainer.js daemon,
+ *   otherwise it will fight you by starting CLASS during its own slice.
  */
 
 import { inGang } from "lib/gang.js";
@@ -35,19 +43,49 @@ export const PLAYER_POLICY_DEFAULTS = {
   trainCity: "Sector-12",
   trainGym: "Powerhouse Gym",
 
-  // ---- Restart bootstrap (FREE) ----
+  // ---- Hack bootstrap (FREE) ----
   bootstrapHackThreshold: 30,
   bootstrapCity: "Sector-12",
   bootstrapUniversity: "Rothman University",
   bootstrapCourse: "Computer Science",
 
-  // ---- Faction work (post-gang) ----
+  // ---- Faction work ----
   factionWorkType: "hacking",
   preferredFactions: ["Daedalus", "NiteSec", "The Black Hand", "BitRunners"],
+
+  // ---- Hour windows ----
+  hourWindows: {
+    // INT slice: top of hour through minute 9 (00-09)
+    intStartMin: 0,
+    intEndMin: 10, // exclusive
+
+    // Faction window: last 10 minutes (50-59)
+    factionStartMin: 50,
+    factionEndMin: 60, // exclusive
+  },
+
+  // ---- INT slice behavior ----
+  intSlice: {
+    // Prefer making missing programs first
+    programPriority: [
+      "BruteSSH.exe",
+      "FTPCrack.exe",
+      "relaySMTP.exe",
+      "HTTPWorm.exe",
+      "SQLInject.exe",
+      "Formulas.exe",
+    ],
+
+    // Fallback: study (INT XP)
+    city: "Sector-12",
+    university: "Rothman University",
+    course: "Computer Science",
+  },
 };
 
 // Module-level state (lives as long as the importing script instance does)
 let bootstrapActive = false;
+let lastMode = ""; // "", "BOOTSTRAP", "INT", "FACTION_WIN", "NORMAL"
 
 /**
  * Run one policy tick. Returns terminal-facing messages (only on state changes).
@@ -62,54 +100,87 @@ export function runHybridPlayerTick(ns, opts = PLAYER_POLICY_DEFAULTS) {
   const work = getCurrentWorkSafe(ns);
 
   // Guard: do not override non-automation work types.
-  // We only “own” CRIME/GYM/CLASS/FACTION. If user is doing company/program/etc, leave it alone.
-  if (work && !["CRIME", "GYM", "CLASS", "FACTION"].includes(work.type)) {
+  // We only “own” CRIME/GYM/CLASS/FACTION/CREATE_PROGRAM.
+  if (work && !["CRIME", "GYM", "CLASS", "FACTION", "CREATE_PROGRAM"].includes(work.type)) {
     return out;
   }
 
   const p = safePlayer(ns);
   const money = p.money ?? 0;
-  const hacking = p.hacking ?? 0;
+
+  // IMPORTANT: ns.getPlayer() doesn't reliably expose p.hacking (it's usually p.skills.hacking)
+  // Use getHackingLevel() as the authoritative value.
+  let hacking = 0;
+  try { hacking = ns.getHackingLevel(); } catch { hacking = 0; }
+
+  const minute = safeMinute();
+  const win = cfg.hourWindows || {};
+  const inIntSlice = minute >= (win.intStartMin ?? 0) && minute < (win.intEndMin ?? 10);
+  const inFactionWindow = minute >= (win.factionStartMin ?? 50) && minute < (win.factionEndMin ?? 60);
 
   // ------------------------------------------------------------
-  // 0) Restart bootstrap: keep studying until hacking >= threshold (FREE)
+  // 1) Hack bootstrap 1-30: study CS
   // ------------------------------------------------------------
   if (hacking < cfg.bootstrapHackThreshold) {
     bootstrapActive = true;
+    mode(out, "BOOTSTRAP", `bootstrap: study until hacking>=${cfg.bootstrapHackThreshold}`);
 
     const r = ensureStudy(
       ns,
-      {
-        city: cfg.bootstrapCity,
-        university: cfg.bootstrapUniversity,
-        course: cfg.bootstrapCourse,
-      },
+      { city: cfg.bootstrapCity, university: cfg.bootstrapUniversity, course: cfg.bootstrapCourse },
       false
     );
-
     if (r.changed) {
-      out.push(
-        `[player] study: ${cfg.bootstrapCourse} @ ${cfg.bootstrapUniversity} (hacking<${cfg.bootstrapHackThreshold})`
-      );
+      out.push(`[player] study: ${cfg.bootstrapCourse} @ ${cfg.bootstrapUniversity} (hacking<${cfg.bootstrapHackThreshold})`);
     }
-
-    // While below threshold, bootstrap owns the tick.
     return out;
   }
 
-  // If we were bootstrapping and have now crossed the threshold, we should transition away.
-  // We don't need to explicitly "stop studying" — starting a crime/faction/gym will replace CLASS.
   if (bootstrapActive) {
     bootstrapActive = false;
-    // Optional: you can log the transition if you want it visible.
-    // out.push(`[player] bootstrap complete (hacking>=${cfg.bootstrapHackThreshold})`);
-    // Do NOT return here; fall through to normal policy to switch immediately.
+    // fall through immediately to normal logic
   }
 
   // ------------------------------------------------------------
-  // 1) Recovery mode: if broke/low cash, ALWAYS do crime first
+  // 2) INT slice: top of hour 00-09 (ALWAYS, even if in gang)
+  // ------------------------------------------------------------
+  if (inIntSlice) {
+    mode(out, "INT", "INT slice (top of hour)");
+
+    // If we are in INT slice, we own work. Prefer createProgram first.
+    const intCfg = cfg.intSlice || {};
+    const missing = (intCfg.programPriority || []).find((prog) => !ns.fileExists(prog, "home"));
+
+    if (missing && ns.singularity && typeof ns.singularity.createProgram === "function") {
+      // Only start if not already creating
+      if (work?.type !== "CREATE_PROGRAM") {
+        try { ns.singularity.createProgram(missing, false); } catch { /* ignore */ }
+        out.push(`[player] INT slice: createProgram ${missing}`);
+      }
+      return out;
+    }
+
+    const r = ensureStudy(
+      ns,
+      { city: intCfg.city, university: intCfg.university, course: intCfg.course },
+      false
+    );
+    if (r.changed) out.push(`[player] INT slice: study: ${intCfg.course} @ ${intCfg.university}`);
+    return out;
+  }
+
+  // If we just left INT slice and we're still doing INT-owned work, stop it so we can switch immediately.
+  if (ns.singularity && typeof ns.singularity.stopAction === "function") {
+    if (work && (work.type === "CLASS" || work.type === "CREATE_PROGRAM")) {
+      try { ns.singularity.stopAction(); } catch { /* ignore */ }
+    }
+  }
+
+  // ------------------------------------------------------------
+  // 3) Post-bootstrap “broke” safety: crime first
   // ------------------------------------------------------------
   if (money < cfg.minCashFloor) {
+    mode(out, "NORMAL", "recovery: low cash => crime");
     const crime = pickBestCrime(ns, cfg.crimePreference, cfg.crimeMinChance);
     const r = ensureCrime(ns, crime, false);
     if (r.changed) out.push(`[player] recovery: crime: ${crime} (cash low)`);
@@ -117,9 +188,24 @@ export function runHybridPlayerTick(ns, opts = PLAYER_POLICY_DEFAULTS) {
   }
 
   // ------------------------------------------------------------
-  // 2) Pre-gang policy
+  // 4) Pre-gang phase
+  //    - last 10 minutes: faction rep grind
+  //    - otherwise: crime logic
   // ------------------------------------------------------------
   if (!inGang(ns)) {
+    if (inFactionWindow) {
+      mode(out, "FACTION_WIN", "pre-gang: faction window (last 10 min)");
+      const faction = pickRepFaction(ns, cfg.preferredFactions);
+      if (faction) {
+        const r = ensureFactionWork(ns, faction, cfg.factionWorkType, false);
+        if (r.changed) out.push(`[player] faction window: ${faction} (${cfg.factionWorkType})`);
+        return out;
+      }
+      // no faction => fall back to crime
+    }
+
+    mode(out, "NORMAL", "pre-gang: crime logic");
+
     const crime = pickBestCrime(ns, cfg.crimePreference, cfg.crimeMinChance);
     const chance = getCrimeChanceSafe(ns, crime);
 
@@ -127,30 +213,26 @@ export function runHybridPlayerTick(ns, opts = PLAYER_POLICY_DEFAULTS) {
     if (chance !== null && chance < cfg.crimeMinChance) {
       if (money >= cfg.gymCashFloor) {
         const stat = pickLowestCombatStat(ns);
-        const r = ensureGymTraining(
-          ns,
-          { city: cfg.trainCity, gym: cfg.trainGym, stat },
-          false
-        );
+        const r = ensureGymTraining(ns, { city: cfg.trainCity, gym: cfg.trainGym, stat }, false);
         if (r.changed) out.push(`[player] training ${stat} @ ${cfg.trainGym}`);
         return out;
       }
-
-      // Gym blocked (too expensive) -> crime anyway
+      // Gym blocked -> crime anyway
       const r = ensureCrime(ns, crime, false);
       if (r.changed) out.push(`[player] crime: ${crime} (gym blocked: cash<${fmtMoney(ns, cfg.gymCashFloor)})`);
       return out;
     }
 
-    // Crime is acceptable -> do it
     const r = ensureCrime(ns, crime, false);
     if (r.changed) out.push(`[player] crime: ${crime}`);
     return out;
   }
 
   // ------------------------------------------------------------
-  // 3) In gang: grind faction rep
+  // 5) In gang: faction rep (Daedalus priority)
   // ------------------------------------------------------------
+  mode(out, "NORMAL", "in gang: faction rep");
+
   const faction = pickRepFaction(ns, cfg.preferredFactions);
   if (!faction) return out;
 
@@ -160,7 +242,7 @@ export function runHybridPlayerTick(ns, opts = PLAYER_POLICY_DEFAULTS) {
 }
 
 /**
- * Picks the first preferred faction you’re currently in, otherwise any faction.
+ * Picks Daedalus if you have it, else preferred list, else any faction.
  * @param {NS} ns
  * @param {string[]} preferred
  * @returns {string}
@@ -168,6 +250,8 @@ export function runHybridPlayerTick(ns, opts = PLAYER_POLICY_DEFAULTS) {
 export function pickRepFaction(ns, preferred) {
   try {
     const my = ns.getPlayer().factions || [];
+    if (my.includes("Daedalus")) return "Daedalus";
+
     for (const f of preferred || []) {
       if (my.includes(f)) return f;
     }
@@ -196,7 +280,10 @@ function pickBestCrime(ns, preference, minChance) {
 
 function safePlayer(ns) {
   try {
-    return ns.getPlayer();
+    const p = ns.getPlayer();
+    // Normalize hacking into a stable place if you ever want it later
+    const hk = (p?.skills?.hacking ?? p?.hacking);
+    return { ...p, hacking: hk };
   } catch (_e) {
     return { money: 0, hacking: 0 };
   }
@@ -208,4 +295,18 @@ function fmtMoney(ns, v) {
   } catch (_e) {
     return String(v);
   }
+}
+
+function safeMinute() {
+  try {
+    return new Date().getMinutes();
+  } catch {
+    return 0;
+  }
+}
+
+function mode(out, m, why) {
+  if (lastMode === m) return;
+  lastMode = m;
+  out.push(`[player] mode -> ${m} (${why})`);
 }

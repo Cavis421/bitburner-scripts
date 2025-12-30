@@ -18,7 +18,6 @@ export function runDaemonLane(ns, cfg, targets, msgs) {
   const traderScript = normScript(cfg.trader);
   const gangScript = normScript(cfg.gangManager);
   const bladeburnerScript = normScript(cfg.bladeburnerManager);
-  const intTrainerScript = normScript(cfg.intTrainer);
 
   const pservArgs = normArgs(cfg.pservArgs || []);
 
@@ -124,18 +123,10 @@ export function runDaemonLane(ns, cfg, targets, msgs) {
   }
 
   // ------------------------------------------------------------
-  // intelligence trainer (idle-safe; Singularity)
+  // intelligence trainer
   // ------------------------------------------------------------
-  if (isEnabled("intTrainer")) {
-    msgs.push(
-      ...fmtEnsure(
-        ensureDaemon(ns, intTrainerScript, { host: "home", threads: 1, reserveRam: cfg.reserveRam }),
-        intTrainerScript
-      )
-    );
-  } else {
-    noteDisabledOnce("intTrainer", intTrainerScript);
-  }
+  // PERMANENT: intelligence training is governed by lib/player-policy.js.
+  // Controller/daemon-lane MUST NOT spawn bin/intelligence-trainer.js.
 
 
   // ------------------------------------------------------------

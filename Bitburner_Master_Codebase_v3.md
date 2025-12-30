@@ -1,6 +1,6 @@
 ﻿# Bitburner Master Codebase v3
 
-> Auto-generated on 2025-12-29 11:52:30.
+> Auto-generated on 2025-12-30 14:42:25.
 
 > Root: C:\Users\campi\projects\bitburner-scripts2\bb
 
@@ -13,11 +13,13 @@
 - apps/wse/stock-api-probe.js
 - bin/backdoor-oneshot.js
 - bin/basic-trader.js
+- bin/bladeburner-manager.js
 - bin/bootstrap.js
 - bin/botnet-hgw-sync.js
 - bin/contracts-find-and-solve.js
 - bin/controller.js
 - bin/darkweb-auto-buyer.js
+- bin/early-money.js
 - bin/gang-manager.js
 - bin/intelligence-trainer.js
 - bin/legacy-real/gang/gang-review.js
@@ -917,51 +919,452 @@ function printHelp(ns) {
 ```
 /* == END FILE == */
 
+/* == FILE: bin/bladeburner-manager.js == */
+```js
+/**
+ * /bin/bladeburner-manager.js
+ *
+ * Description
+ *  BN6 Bladeburner automation daemon:
+ *   - (Optional) auto-join Bladeburner division when eligible
+ *   - spends skill points by priority
+ *   - manages stamina (train/field analysis when low)
+ *   - manages chaos (diplomacy when high)
+ *   - selects best contract/operation by success chance + expected value
+ *   - attempts BlackOps when rank/chance thresholds are met
+ *
+ * Notes
+ *  - Requires Bladeburner API (BN6 or SF7+).
+ *  - Safe to run even before joining: it can idle/exit cleanly.
+ *  - Uses conservative success thresholds by default to avoid fail spirals.
+ *
+ * Syntax
+ *  run /bin/bladeburner-manager.js
+ *  run /bin/bladeburner-manager.js --minChance 0.7 --blackopMinChance 0.8
+ *  run /bin/bladeburner-manager.js --city "Sector-12"
+ *  run /bin/bladeburner-manager.js --help
+ */
+
+/** @param {NS} ns */
+const FLAGS = [
+    ["help", false],
+
+    // Looping
+    ["loop", true],
+    ["pollMs", 2500],
+
+    // Join behavior
+    ["autoJoin", true],
+
+    // Action safety
+    ["minChance", 0.70],           // min success chance for contracts/ops
+    ["blackopMinChance", 0.80],    // min chance for blackops
+    ["staminaMinFrac", 0.55],      // if stamina/max below this, recover
+    ["chaosThresh", 50],           // if city chaos above this, run diplomacy
+    ["preferOps", true],           // prefer operations over contracts when both are good
+
+    // City control (optional)
+    ["city", ""],                  // if set, will try to stay here
+
+    // Skill upgrades
+    ["spendSkills", true],
+];
+
+export async function main(ns) {
+    const flags = ns.flags(FLAGS);
+    if (flags.help) {
+        printHelp(ns);
+        return;
+    }
+
+    ns.disableLog("ALL");
+
+    if (!hasBladeburner(ns)) {
+        ns.tprint("ERROR: Bladeburner API not available (need BN6 or SF7+).");
+        return;
+    }
+
+    // Main daemon loop
+    while (true) {
+        const did = tick(ns, flags);
+
+        if (!flags.loop) break;
+        await ns.sleep(Math.max(200, Number(flags.pollMs) || 2500));
+
+        // If we *can't* do anything (not joined + can't join), don't spam.
+        // (tick() already prints minimal info; keep this silent.)
+        void did;
+    }
+}
+
+function tick(ns, flags) {
+    // 1) Ensure we're in Bladeburners (optional)
+    const inBB = safeBool(() => ns.bladeburner.inBladeburner(), false);
+
+    if (!inBB) {
+        if (flags.autoJoin) {
+            const joined = safeBool(() => ns.bladeburner.joinBladeburnerDivision(), false);
+            if (joined) ns.print("[bb] Joined Bladeburner division.");
+        }
+
+        const nowIn = safeBool(() => ns.bladeburner.inBladeburner(), false);
+        if (!nowIn) {
+            ns.print("[bb] Not in Bladeburners yet (idle).");
+            return false;
+        }
+    }
+
+    // 2) City preference
+    const desiredCity = String(flags.city || "").trim();
+    if (desiredCity) {
+        const cur = safeStr(() => ns.bladeburner.getCity(), "");
+        if (cur && cur !== desiredCity) {
+            safeBool(() => ns.bladeburner.switchCity(desiredCity), false);
+        }
+    }
+
+    // 3) Spend skill points
+    if (flags.spendSkills) spendSkillPoints(ns);
+
+    // 4) Stamina management
+    const stamina = safeObj(() => ns.bladeburner.getStamina(), [0, 0]);
+    const curSta = Number(stamina?.[0] ?? 0);
+    const maxSta = Math.max(1, Number(stamina?.[1] ?? 1));
+    const staFrac = curSta / maxSta;
+
+    if (staFrac < Number(flags.staminaMinFrac)) {
+        return ensureAction(ns, "General", pickRecoveryGeneral(ns), "[bb] recovering stamina");
+    }
+
+    // 5) Chaos management (in current city)
+    const city = safeStr(() => ns.bladeburner.getCity(), "Sector-12");
+    const chaos = safeNum(() => ns.bladeburner.getCityChaos(city), 0);
+    if (chaos > Number(flags.chaosThresh)) {
+        // Diplomacy is the standard â€œreduce chaosâ€ lever.
+        return ensureAction(ns, "General", "Diplomacy", `[bb] chaos ${chaos.toFixed(1)} in ${city} -> Diplomacy`);
+    }
+
+    // 6) BlackOps (when available and safe)
+    const blackopPick = pickBestBlackOp(ns, Number(flags.blackopMinChance));
+    if (blackopPick) {
+        return ensureAction(ns, "BlackOp", blackopPick.name, `[bb] BLACKOP ${blackopPick.name} (chance ${(blackopPick.chance * 100).toFixed(1)}%)`);
+    }
+
+    // 7) Normal money/rank actions: operations/contracts
+    const bestOp = pickBestAction(ns, "Operation", Number(flags.minChance));
+    const bestContract = pickBestAction(ns, "Contract", Number(flags.minChance));
+
+    const preferOps = !!flags.preferOps;
+
+    const chosen =
+        pickByValue(bestOp, bestContract, { preferOps });
+
+    if (chosen) {
+        return ensureAction(ns, chosen.type, chosen.name, `[bb] ${chosen.type} ${chosen.name} (chance ${(chosen.chance * 100).toFixed(1)}%)`);
+    }
+
+    // 8) Fallback: Field Analysis (improves estimates and is always safe)
+    return ensureAction(ns, "General", "Field Analysis", "[bb] fallback -> Field Analysis");
+}
+
+// -----------------------------------------------------------------------------
+// Action picking
+// -----------------------------------------------------------------------------
+
+function pickRecoveryGeneral(ns) {
+    // Training improves stats; Field Analysis improves chance estimates.
+    // When stamina is low, both are fine â€” training is a better â€œBN6 rampâ€.
+    const hasTraining = includesSafe(() => ns.bladeburner.getGeneralActionNames(), "Training");
+    if (hasTraining) return "Training";
+    return "Field Analysis";
+}
+
+function pickBestBlackOp(ns, minChance) {
+    const names = safeArr(() => ns.bladeburner.getBlackOpNames(), []);
+    if (!names.length) return null;
+
+    // Only attempt blackops that are â€œavailableâ€ (remaining count > 0).
+    const candidates = [];
+    for (const name of names) {
+        const remaining = safeNum(() => ns.bladeburner.getActionCountRemaining("BlackOp", name), 0);
+        if (remaining <= 0) continue;
+
+        const chance = estimateChance(ns, "BlackOp", name);
+        if (chance < minChance) continue;
+
+        // Some versions expose rank requirement; if not, just rely on chance + remaining.
+        const rank = safeNum(() => ns.bladeburner.getRank(), 0);
+        const req = safeNum(() => ns.bladeburner.getBlackOpRank(name), 0);
+        if (req > 0 && rank < req) continue;
+
+        candidates.push({ name, chance, remaining, req });
+    }
+
+    // Prefer the *highest* rank requirement you can do (progression).
+    candidates.sort((a, b) => (b.req - a.req) || (b.chance - a.chance) || a.name.localeCompare(b.name));
+    return candidates[0] || null;
+}
+
+function pickBestAction(ns, type, minChance) {
+    const names =
+        type === "Operation"
+            ? safeArr(() => ns.bladeburner.getOperationNames(), [])
+            : safeArr(() => ns.bladeburner.getContractNames(), []);
+
+    const out = [];
+    for (const name of names) {
+        const remaining = safeNum(() => ns.bladeburner.getActionCountRemaining(type, name), 0);
+        if (remaining <= 0) continue;
+
+        const chance = estimateChance(ns, type, name);
+        if (chance < minChance) continue;
+
+        // Use a simple â€œexpected successâ€ score. Without deep formulas,
+        // (chance * remaining) is a decent proxy to avoid running out of tasks.
+        const score = chance * Math.min(1000, remaining);
+
+        out.push({ type, name, chance, remaining, score });
+    }
+
+    out.sort((a, b) => (b.score - a.score) || (b.chance - a.chance) || a.name.localeCompare(b.name));
+    return out[0] || null;
+}
+
+function pickByValue(bestOp, bestContract, opts) {
+    if (!bestOp && !bestContract) return null;
+    if (bestOp && !bestContract) return bestOp;
+    if (!bestOp && bestContract) return bestContract;
+
+    // Both exist. Respect preference unless the other is *meaningfully* better.
+    const preferOps = !!opts.preferOps;
+    const a = preferOps ? bestOp : bestContract;
+    const b = preferOps ? bestContract : bestOp;
+
+    // If bâ€™s score is at least 15% better, take b.
+    if ((b.score || 0) > (a.score || 0) * 1.15) return b;
+    return a;
+}
+
+function ensureAction(ns, type, name, reason) {
+    const cur = safeObj(() => ns.bladeburner.getCurrentAction(), null);
+    const curType = String(cur?.type ?? "");
+    const curName = String(cur?.name ?? "");
+
+    if (curType === type && curName === name) return true;
+
+    const ok = safeBool(() => ns.bladeburner.startAction(type, name), false);
+    if (ok) ns.print(reason);
+    else ns.print(`[bb] failed to start ${type}:${name}`);
+    return ok;
+}
+
+function estimateChance(ns, type, name) {
+    const pair = safeArr(() => ns.bladeburner.getActionEstimatedSuccessChance(type, name), [0, 0]);
+    const lo = Number(pair?.[0] ?? 0);
+    const hi = Number(pair?.[1] ?? 0);
+    // Conservative: use low bound (avoids surprise fails early in BN6)
+    return clamp01(lo || 0);
+}
+
+// -----------------------------------------------------------------------------
+// Skill spending
+// -----------------------------------------------------------------------------
+
+function spendSkillPoints(ns) {
+    const points = safeNum(() => ns.bladeburner.getSkillPoints(), 0);
+    if (points <= 0) return;
+
+    const skills = safeArr(() => ns.bladeburner.getSkillNames(), []);
+
+    // Priority: survivability + success + stamina economy.
+    // We only upgrade skills that exist in this version/save.
+    const priority = [
+        "Overclock",
+        "Reaper",
+        "Evasive System",
+        "Evasive Systems",
+        "Cloak",
+        "Digital Observer",
+        "Blade's Intuition",
+        "Hyperdrive",
+        "Hands of Midas",
+    ].filter((s) => skills.includes(s));
+
+    for (let i = 0; i < 50; i++) {
+        const p = safeNum(() => ns.bladeburner.getSkillPoints(), 0);
+        if (p <= 0) return;
+
+        let upgraded = false;
+
+        for (const sk of priority) {
+            const cost = safeNum(() => ns.bladeburner.getSkillUpgradeCost(sk), Infinity);
+            if (cost <= p) {
+                const ok = safeBool(() => ns.bladeburner.upgradeSkill(sk, 1), false);
+                if (ok) {
+                    ns.print(`[bb] skill+ ${sk}`);
+                    upgraded = true;
+                    break;
+                }
+            }
+        }
+
+        if (!upgraded) return;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Small safe helpers
+// -----------------------------------------------------------------------------
+
+function hasBladeburner(ns) {
+    return !!ns.bladeburner
+        && typeof ns.bladeburner.inBladeburner === "function"
+        && typeof ns.bladeburner.startAction === "function";
+}
+
+function clamp01(x) {
+    x = Number(x) || 0;
+    return Math.min(1, Math.max(0, x));
+}
+
+function safeNum(fn, fallback) {
+    try {
+        const v = Number(fn());
+        return Number.isFinite(v) ? v : fallback;
+    } catch {
+        return fallback;
+    }
+}
+
+function safeBool(fn, fallback) {
+    try { return Boolean(fn()); } catch { return fallback; }
+}
+
+function safeStr(fn, fallback) {
+    try { return String(fn()); } catch { return fallback; }
+}
+
+function safeArr(fn, fallback) {
+    try {
+        const v = fn();
+        return Array.isArray(v) ? v : fallback;
+    } catch {
+        return fallback;
+    }
+}
+
+function safeObj(fn, fallback) {
+    try { return fn(); } catch { return fallback; }
+}
+
+function includesSafe(fn, item) {
+    try {
+        const a = fn();
+        return Array.isArray(a) && a.includes(item);
+    } catch {
+        return false;
+    }
+}
+
+/** @param {NS} ns */
+function printHelp(ns) {
+    ns.tprint("/bin/bladeburner-manager.js");
+    ns.tprint("");
+    ns.tprint("Description");
+    ns.tprint("  BN6 Bladeburner automation daemon (join/skills/city/actions/blackops).");
+    ns.tprint("");
+    ns.tprint("Notes");
+    ns.tprint("  - Requires Bladeburner API (BN6 or SF7+).");
+    ns.tprint("  - Conservative defaults: uses LOW success chance estimate to avoid fail spirals.");
+    ns.tprint("  - Chaos is controlled via Diplomacy; stamina via Training/Field Analysis.");
+    ns.tprint("");
+    ns.tprint("Syntax");
+    ns.tprint("  run /bin/bladeburner-manager.js");
+    ns.tprint("  run /bin/bladeburner-manager.js --minChance 0.75 --blackopMinChance 0.85");
+    ns.tprint("  run /bin/bladeburner-manager.js --city \"Sector-12\" --chaosThresh 40");
+    ns.tprint("  run /bin/bladeburner-manager.js --autoJoin false");
+    ns.tprint("  run /bin/bladeburner-manager.js --help");
+    ns.tprint("");
+    ns.tprint("Flags");
+    ns.tprint("  --loop true|false             Loop forever (default true)");
+    ns.tprint("  --pollMs <ms>                 Poll interval (default 2500)");
+    ns.tprint("  --autoJoin true|false         Attempt to join BB when eligible (default true)");
+    ns.tprint("  --minChance <0..1>            Min chance for contracts/ops (default 0.70)");
+    ns.tprint("  --blackopMinChance <0..1>     Min chance for blackops (default 0.80)");
+    ns.tprint("  --staminaMinFrac <0..1>       Recover below this stamina fraction (default 0.55)");
+    ns.tprint("  --chaosThresh <n>             Diplomacy above this chaos (default 50)");
+    ns.tprint("  --preferOps true|false        Prefer operations over contracts (default true)");
+    ns.tprint("  --city <name>                 Optional city lock (default none)");
+    ns.tprint("  --spendSkills true|false      Auto-upgrade skills (default true)");
+}
+```
+/* == END FILE == */
+
 /* == FILE: bin/bootstrap.js == */
 ```js
 /**
  * /bin/bootstrap.js
  *
  * Description
- *  Minimal BN-restart-safe launcher that starts the heavy controller only when home has enough free RAM.
- *  While waiting, it can keep one or more lightweight early daemons running.
+ *  Staged bootstrap workflow (HOME MAX RAM milestones):
+ *    1) Stage A: run early-money while home MAX RAM < 64GB
+ *    2) Stage B: run startup-home-advanced ONCE while 64GB <= home MAX RAM < 1024GB
+ *    3) Stage C: start controller when home MAX RAM >= 1024GB (and it fits in FREE RAM)
+ *
+ *  On ANY stage switch, bootstrap kills "all workers" by killing all scripts on home
+ *  except an allowlist (bootstrap itself only).
+ *
+ *  NEW (Player bootstrap safety):
+ *   - Periodically enforces a free Rothman CS class while hacking < threshold
+ *   - Once hacking >= threshold, kicks you out of class by starting a crime (crime-first)
  *
  * Notes
- *  - Avoids heavy imports to keep RAM cost tiny.
- *  - Early daemons are best-effort and will only start if affordable.
- *  - If --stopEarly true, early daemons are stopped right before starting the controller.
+ *  - Avoids imports to keep RAM cost tiny.
+ *  - Stage1 is treated like a daemon (kept running).
+ *  - Stage2 is a one-shot launcher (run once per entry into Stage2).
+ *  - Controller launch requires the script RAM cost to fit in FREE RAM at the moment of launch.
  *
  * Syntax
  *  run /bin/bootstrap.js
- *  run /bin/bootstrap.js --controllerRam 700 --poll 5000
- *  run /bin/bootstrap.js --early "/bin/startup-home-advanced.js"
- *  run /bin/bootstrap.js --earlyList "/bin/startup-home-advanced.js,/bin/botnet-hgw-sync.js"
- *  run /bin/bootstrap.js --stopEarly false
+ *  run /bin/bootstrap.js --poll 2000
  *  run /bin/bootstrap.js --help
  */
 
 /** @param {NS} ns */
-
 const FLAGS = [
   ["help", false],
-  // Heavy controller
-  ["controller", "/bin/controller.js"],
+
+  // Stage thresholds (HOME MAX RAM, in GB)
+  ["stage1Ram", 64],
+  ["stage2Ram", 1024],
+
+  // Stage scripts
+  ["stage1", "bin/early-money.js"],
+  ["stage2", "bin/startup-home-advanced.js"],
+
+  // Controller
+  ["controller", "bin/controller.js"],
   ["controllerThreads", 1],
-  ["controllerRam", 1000],        // how much FREE home RAM required to start controller
-
-  // Early daemon(s)
-  // Back-compat single early script:
-  ["early", "/bin/startup-home-advanced.js"], // set "" to disable
-  // New: comma-separated list of early scripts (overrides --early if provided)
-  ["earlyList", ""], // e.g. "/bin/startup-home-advanced.js,/bin/botnet-hgw-sync.js"
-  ["earlyThreads", 1],
-  ["stopEarly", true],           // stop early daemon(s) right before launching controller
-
-  // Loop cadence
-  ["poll", 5000],
 
   // Behavior
-  ["exitAfterStart", true],
+  ["killWorkersOnSwitch", true],
+  // IMPORTANT: keep bootstrap alive so it can enforce player bootstrap policy.
+  // You can flip this back to true if you don’t want this behavior.
+  ["exitAfterControllerStart", false],
+  ["poll", 5000],
+
+  // ------------------------------------------------------------
+  // Player bootstrap enforcement (Singularity)
+  // ------------------------------------------------------------
+  ["playerBootstrap", true],
+  ["bootstrapHackThreshold", 30],
+  ["bootstrapCity", "Sector-12"],
+  ["bootstrapUniversity", "Rothman University"],
+  ["bootstrapCourse", "Computer Science"],
+  ["bootstrapCrime", "homicide"],
+
+  // Only interfere with CLASS when we are specifically in the bootstrap course/location.
+  ["strictBootstrapClassMatch", true],
 ];
 
 export async function main(ns) {
@@ -973,92 +1376,218 @@ export async function main(ns) {
 
   ns.disableLog("ALL");
 
-  const controller = String(flags.controller);
   const poll = Math.max(1000, Number(flags.poll) || 5000);
-  const needFree = Math.max(0, Number(flags.controllerRam) || 0);
+
+  const stage1Ram = Math.max(1, Number(flags.stage1Ram) || 64);
+  const stage2Ram = Math.max(stage1Ram, Number(flags.stage2Ram) || 1024);
+
+  const stage1Script = normPath(String(flags.stage1 || "").trim());
+  const stage2Script = normPath(String(flags.stage2 || "").trim());
+
+  const controllerScript = normPath(String(flags.controller || "bin/controller.js").trim());
   const controllerThreads = Math.max(1, Math.floor(Number(flags.controllerThreads) || 1));
-  const exitAfterStart = !!flags.exitAfterStart;
 
-  const stopEarly = !!flags.stopEarly;
-  const earlyThreads = Math.max(1, Math.floor(Number(flags.earlyThreads) || 1));
+  const killWorkersOnSwitch = !!flags.killWorkersOnSwitch;
+  const exitAfterControllerStart = !!flags.exitAfterControllerStart;
 
-  // Pass-through args after `--` go to the early daemon(s)
-  // Example: run /bin/bootstrap.js -- n00dles money
-  const earlyArgs = flags._.slice(0);
+  // Player bootstrap cfg
+  const playerBootstrap = !!flags.playerBootstrap;
+  const bootHack = Math.max(1, Math.floor(Number(flags.bootstrapHackThreshold) || 30));
+  const bootCity = String(flags.bootstrapCity || "Sector-12");
+  const bootUni = String(flags.bootstrapUniversity || "Rothman University");
+  const bootCourse = String(flags.bootstrapCourse || "Computer Science");
+  const bootCrime = String(flags.bootstrapCrime || "homicide");
+  const strictClassMatch = !!flags.strictBootstrapClassMatch;
 
-  // Determine early scripts:
-  // - If earlyList provided, use that
-  // - Else fall back to `early`
-  const earlyList = parseEarlyList(String(flags.earlyList || "").trim());
-  const earlySingle = String(flags.early || "").trim();
+  // Args after `--` are forwarded to stage scripts (optional)
+  const passthroughArgs = flags._.slice(0);
 
-  /** @type {string[]} */
-  const earlyScripts = (earlyList.length > 0)
-    ? earlyList
-    : (earlySingle ? [earlySingle] : []);
+  /** @type {"stage1"|"stage2"|"controller"|null} */
+  let lastMode = null;
 
-  // Normalize: allow "bin/x.js" or "/bin/x.js" — ensure leading "/"
-  const earlyScriptsNorm = earlyScripts
-    .map(s => String(s || "").trim())
-    .filter(Boolean)
-    .map(s => s.startsWith("/") ? s : ("/" + s));
-
-  const controllerNorm = controller.startsWith("/") ? controller : ("/" + controller);
+  // Stage2 must only be started once per entry into stage2
+  let stage2Started = false;
 
   while (true) {
-    // Keep early daemon(s) alive while waiting
-    for (const s of earlyScriptsNorm) {
-      ensureEarlyDaemon(ns, s, earlyThreads, earlyArgs);
-    }
+    const homeMax = ns.getServerMaxRam("home");
 
-    // Attempt to start controller if affordable
-    const freeAfter = getFreeRam(ns);
-    if (freeAfter < needFree) {
-      await ns.sleep(poll);
-      continue;
-    }
+    const mode =
+      homeMax < stage1Ram ? "stage1"
+        : homeMax < stage2Ram ? "stage2"
+          : "controller";
 
-    if (!ns.fileExists(controllerNorm, "home")) {
-      ns.tprint(`[bootstrap] ERROR: controller missing on home: ${controllerNorm}`);
-      return;
-    }
-
-    const controllerCost = ns.getScriptRam(controllerNorm, "home") * controllerThreads;
-    if (!Number.isFinite(controllerCost) || controllerCost <= 0) {
-      ns.tprint(`[bootstrap] ERROR: controller RAM cost invalid: ${controllerNorm}`);
-      return;
-    }
-
-    if (controllerCost > getFreeRam(ns)) {
-      await ns.sleep(poll);
-      continue;
-    }
-
-    // Stop early daemon(s) just before launching controller if configured
-    if (stopEarly && earlyScriptsNorm.length > 0) {
-      for (const s of earlyScriptsNorm) {
-        tryStop(ns, s, "home");
+    // ------------------------------------------------------------
+    // Stage transition: cleanup + latches
+    // ------------------------------------------------------------
+    if (mode !== lastMode) {
+      if (killWorkersOnSwitch) {
+        const allow = buildAllowList();
+        const killed = killAllExcept(ns, "home", allow);
+        ns.tprint(lastMode
+          ? `[bootstrap] switch ${lastMode} -> ${mode} | killed=${killed}`
+          : `[bootstrap] start in ${mode} | killed=${killed}`
+        );
+      } else if (lastMode === null) {
+        ns.tprint(`[bootstrap] start in ${mode}`);
       }
-      // Give a moment for RAM to free up
+
+      // Reset stage2 latch when entering stage2
+      if (mode === "stage2") stage2Started = false;
+
+      // Give RAM accounting a moment to settle
       await ns.sleep(50);
+      lastMode = mode;
     }
 
-    const pid = ns.run(controllerNorm, controllerThreads);
-    if (pid) {
-      ns.tprint(`[bootstrap] started ${controllerNorm} (pid=${pid}) freeRam=${getFreeRam(ns).toFixed(1)}`);
-      if (exitAfterStart) return;
-    } else {
-      // Rare: run failed (race) — keep looping
-      ns.tprint(`[bootstrap] WARN: failed to start ${controllerNorm} (ns.run returned ${pid})`);
+    // ------------------------------------------------------------
+    // Stage 1: early-money (daemon style)
+    // ------------------------------------------------------------
+    if (mode === "stage1") {
+      // Extra safety: don't allow stage2/controller overlap
+      tryStop(ns, stage2Script, "home");
+      tryStop(ns, controllerScript, "home");
+
+      ensureDaemonBestEffort(ns, stage1Script, 1, passthroughArgs);
+      await ns.sleep(poll);
+      continue;
     }
+
+    // ------------------------------------------------------------
+    // Stage 2: startup-home-advanced (ONE-SHOT)
+    // ------------------------------------------------------------
+    if (mode === "stage2") {
+      // Extra safety: don't allow stage1/controller overlap
+      tryStop(ns, stage1Script, "home");
+      tryStop(ns, controllerScript, "home");
+
+      if (!stage2Started) {
+        const started = ensureDaemonBestEffort(ns, stage2Script, 1, passthroughArgs);
+        if (started) {
+          ns.tprint(`[bootstrap] stage2 started one-shot: ${stage2Script}`);
+          stage2Started = true;
+        }
+      }
+
+      await ns.sleep(poll);
+      continue;
+    }
+
+    // ------------------------------------------------------------
+    // Stage 3: controller
+    // ------------------------------------------------------------
+    // Hard guarantee: no overlap with stage scripts
+    tryStop(ns, stage1Script, "home");
+    tryStop(ns, stage2Script, "home");
+    await ns.sleep(50);
+
+    if (!controllerScript || !ns.fileExists(controllerScript, "home")) {
+      ns.tprint(`[bootstrap] ERROR: controller missing on home: ${controllerScript || "(empty)"}`);
+      return;
+    }
+
+    // If controller isn't running, start it when affordable
+    if (!isRunning(ns, controllerScript, "home")) {
+      const cost = ns.getScriptRam(controllerScript, "home") * controllerThreads;
+      if (!Number.isFinite(cost) || cost <= 0) {
+        ns.tprint(`[bootstrap] ERROR: controller RAM cost invalid: ${controllerScript}`);
+        return;
+      }
+
+      const free = getFreeRam(ns);
+      if (free >= cost) {
+        const pid = ns.run(controllerScript, controllerThreads);
+        if (pid && pid > 0) {
+          ns.tprint(
+            `[bootstrap] started ${controllerScript} (pid=${pid}) ` +
+            `homeMax=${homeMax}GB free=${getFreeRam(ns).toFixed(1)}GB cost=${cost.toFixed(1)}GB`
+          );
+        } else {
+          ns.tprint(`[bootstrap] WARN: failed to start ${controllerScript} (ns.run returned ${pid})`);
+        }
+      }
+    }
+
+    // NEW: Periodic player bootstrap enforcement while we remain alive
+    if (playerBootstrap) {
+      enforcePlayerBootstrap(ns, {
+        hackThreshold: bootHack,
+        city: bootCity,
+        university: bootUni,
+        course: bootCourse,
+        crime: bootCrime,
+        strictClassMatch: strictClassMatch ?? true,
+      });
+    }
+
+    if (exitAfterControllerStart && isRunning(ns, controllerScript, "home")) return;
 
     await ns.sleep(poll);
   }
 }
 
 // ------------------------------------------------------------
+// Player bootstrap enforcement (no imports; tiny; defensive)
+// ------------------------------------------------------------
+function enforcePlayerBootstrap(ns, cfg) {
+  try {
+    if (!ns.singularity) return;
+    if (typeof ns.singularity.getCurrentWork !== "function") return;
+
+    // Default strict matching ON unless explicitly set to false
+    const strict = cfg.strictClassMatch !== false;
+
+    const p = ns.getPlayer();
+    const hacking = ns.getHackingLevel(); // bulletproof vs any getPlayer weirdness
+
+    const w = ns.singularity.getCurrentWork?.() || null;
+    const wType = w?.type || "";
+
+    // While hacking < threshold: ensure we are taking the free CS course (Rothman, Sector-12).
+    if (hacking < cfg.hackThreshold) {
+      // If already in CLASS, only treat it as "ok" if it's the exact bootstrap class (when strict).
+      if (wType === "CLASS") {
+        if (strict) {
+          const loc = String(w?.location || "");
+          const cls = String(w?.classType || "");
+          if (loc === cfg.university && cls === cfg.course) return;
+          // otherwise override to bootstrap course below
+        } else {
+          // legacy behavior: any class counts, avoid thrash
+          return;
+        }
+      }
+
+      // Travel to city (optional; safe)
+      if (typeof ns.singularity.travelToCity === "function" && p.city !== cfg.city) {
+        try { ns.singularity.travelToCity(cfg.city); } catch { /* ignore */ }
+      }
+
+      // Start the bootstrap course
+      if (typeof ns.singularity.universityCourse === "function") {
+        const ok = ns.singularity.universityCourse(cfg.university, cfg.course, false);
+        if (ok) ns.print(
+          `[bootstrap-player] study: ${cfg.course} @ ${cfg.university} (hacking=${hacking} < ${cfg.hackThreshold})`
+        );
+      }
+      return;
+    }
+
+    // Once hacking >= threshold: bootstrap enforcement is DONE.
+    // Controller/player-policy owns what happens next (prevents CLASS <-> CRIME ping-pong).
+    return;
+  } catch {
+    // No terminal spam; bootstrap stays resilient.
+  }
+}
+
+
+// ------------------------------------------------------------
 // Helpers (keep tiny; no imports)
 // ------------------------------------------------------------
+function normPath(p) {
+  // Your repo uses "bin/..." paths; strip leading "/" if present.
+  return String(p || "").trim().replace(/^\/+/, "");
+}
 
 function getFreeRam(ns) {
   const max = ns.getServerMaxRam("home");
@@ -1067,50 +1596,68 @@ function getFreeRam(ns) {
 }
 
 function isRunning(ns, script, host) {
+  try { return ns.isRunning(String(script || ""), host); } catch { return false; }
+}
+
+function tryStop(ns, script, host) {
   try {
-    // normalize slashes just in case
-    const s = String(script || "");
-    return ns.isRunning(s, host);
+    if (script && isRunning(ns, script, host)) ns.scriptKill(script, host);
+  } catch { /* ignore */ }
+}
+
+function ensureDaemonBestEffort(ns, script, threads, args) {
+  if (!script) return false;
+  if (!ns.fileExists(script, "home")) return false;
+  if (isRunning(ns, script, "home")) return false;
+
+  const t = Math.max(1, Math.floor(Number(threads) || 1));
+  const cost = ns.getScriptRam(script, "home") * t;
+  const free = getFreeRam(ns);
+
+  if (!Number.isFinite(cost) || cost <= 0) return false;
+  if (cost > free) return false;
+
+  try {
+    const pid = ns.run(script, t, ...(args || []));
+    return pid > 0;
   } catch {
     return false;
   }
 }
 
-function tryStop(ns, script, host) {
-  try {
-    if (isRunning(ns, script, host)) ns.scriptKill(script, host);
-  } catch {
-    // ignore
-  }
+/**
+ * Allowlist for stage switching.
+ * For your stated goal ("kill all workers"), we only preserve bootstrap itself.
+ */
+function buildAllowList() {
+  return new Set(["bin/bootstrap.js"]);
 }
 
-function ensureEarlyDaemon(ns, script, threads, args) {
-  if (!script) return;
-  if (!ns.fileExists(script, "home")) return;
+/**
+ * Kill everything on host except allowlisted script filenames.
+ * Returns number of script filenames it attempted to kill.
+ */
+function killAllExcept(ns, host, allowSet) {
+  let killed = 0;
+  const procs = safeArr(() => ns.ps(host), []);
+  for (const p of procs) {
+    const file = String(p.filename || "");
+    if (allowSet.has(file)) continue;
 
-  // If already running (normalized), don't duplicate
-  if (isRunning(ns, script, "home")) return;
-
-  const t = Math.max(1, Math.floor(threads));
-  const cost = ns.getScriptRam(script, "home") * t;
-  const free = getFreeRam(ns);
-
-  if (!Number.isFinite(cost) || cost <= 0) return;
-  if (cost > free) return;
-
-  try {
-    ns.run(script, t, ...(args || []));
-  } catch {
-    // ignore
+    try {
+      // Kill by filename (kills all instances). Matches your "kill all workers" intent.
+      ns.scriptKill(file, host);
+      killed++;
+    } catch { /* ignore */ }
   }
+  return killed;
 }
 
-function parseEarlyList(listStr) {
-  if (!listStr) return [];
-  return listStr
-    .split(",")
-    .map(s => String(s || "").trim())
-    .filter(Boolean);
+function safeArr(fn, fallback) {
+  try {
+    const v = fn();
+    return Array.isArray(v) ? v : fallback;
+  } catch { return fallback; }
 }
 
 // ------------------------------------------------------------
@@ -1120,36 +1667,45 @@ function printHelp(ns) {
   ns.tprint("/bin/bootstrap.js");
   ns.tprint("");
   ns.tprint("Description");
-  ns.tprint("  Minimal BN-restart-safe launcher that starts /bin/controller.js only when home has enough free RAM.");
-  ns.tprint("  While waiting, it can keep one or more lightweight early daemons running.");
+  ns.tprint("  Staged bootstrap workflow:");
+  ns.tprint("    1) early-money while home MAX RAM < 64GB");
+  ns.tprint("    2) startup-home-advanced ONE-SHOT while home MAX RAM < 1024GB");
+  ns.tprint("    3) start controller when home MAX RAM >= 1024GB and controller fits in FREE RAM");
+  ns.tprint("  On any stage switch, kills all non-allowlisted scripts on home (\"kill all workers\").");
   ns.tprint("");
-  ns.tprint("Notes");
-  ns.tprint("  - Avoids heavy imports to keep RAM cost tiny.");
-  ns.tprint("  - Early daemons are best-effort and will only start if affordable.");
-  ns.tprint("  - By default, early daemons are stopped right before starting the heavy controller.");
+  ns.tprint("NEW: Player bootstrap");
+  ns.tprint("  While hacking < threshold, enforce FREE Computer Science at Rothman University (Sector-12).");
+  ns.tprint("  Once hacking >= threshold, if still in that class, switch to crime.");
   ns.tprint("");
   ns.tprint("Syntax");
   ns.tprint("  run /bin/bootstrap.js");
-  ns.tprint("  run /bin/bootstrap.js --controllerRam 700 --poll 5000");
-  ns.tprint("  run /bin/bootstrap.js --early \"/bin/startup-home-advanced.js\"");
-  ns.tprint("  run /bin/bootstrap.js --earlyList \"/bin/startup-home-advanced.js,/bin/botnet-hgw-sync.js\"");
-  ns.tprint("  run /bin/bootstrap.js --stopEarly false");
+  ns.tprint("  run /bin/bootstrap.js --poll 2000");
+  ns.tprint("  run /bin/bootstrap.js --playerBootstrap false");
+  ns.tprint("  run /bin/bootstrap.js --exitAfterControllerStart true");
   ns.tprint("  run /bin/bootstrap.js --help");
   ns.tprint("");
   ns.tprint("Flags");
-  ns.tprint("  --controller <path>       Controller script (default /bin/controller.js)");
-  ns.tprint("  --controllerThreads <n>   Threads to run controller (default 1)");
-  ns.tprint("  --controllerRam <gb>      Free RAM required before starting controller (default 700)");
-  ns.tprint("  --early <path>            Single early daemon (default /bin/startup-home-advanced.js). Set \"\" to disable.");
-  ns.tprint("  --earlyList <csv>         Comma-separated early daemons. Overrides --early if provided.");
-  ns.tprint("  --earlyThreads <n>        Threads for each early daemon (default 1)");
-  ns.tprint("  --stopEarly true|false    Stop early daemon(s) before starting controller (default true)");
-  ns.tprint("  --poll <ms>               Poll interval while waiting (default 5000)");
-  ns.tprint("  --exitAfterStart true|false  Exit after launching controller (default true)");
+  ns.tprint("  --stage1 <path>               Stage1 script (default bin/early-money.js)");
+  ns.tprint("  --stage1Ram <gb>              Stage1 cutoff home MAX RAM (default 64)");
+  ns.tprint("  --stage2 <path>               Stage2 script (default bin/startup-home-advanced.js)");
+  ns.tprint("  --stage2Ram <gb>              Stage2 cutoff home MAX RAM (default 1024)");
+  ns.tprint("  --controller <path>           Controller script (default bin/controller.js)");
+  ns.tprint("  --controllerThreads <n>       Controller threads (default 1)");
+  ns.tprint("  --killWorkersOnSwitch t|f      Kill all scripts on home except bootstrap (default true)");
+  ns.tprint("  --exitAfterControllerStart t|f Exit after starting controller (default false)");
+  ns.tprint("  --poll <ms>                    Poll interval (default 5000)");
+  ns.tprint("");
+  ns.tprint("Player bootstrap flags");
+  ns.tprint("  --playerBootstrap t|f          Enable hack<30 study enforcement (default true)");
+  ns.tprint("  --bootstrapHackThreshold <n>   Threshold (default 30)");
+  ns.tprint("  --bootstrapCity <name>         City to study in (default Sector-12)");
+  ns.tprint("  --bootstrapUniversity <name>   University (default Rothman University)");
+  ns.tprint("  --bootstrapCourse <name>       Course (default Computer Science)");
+  ns.tprint("  --bootstrapCrime <name>        Crime to switch to after threshold (default homicide)");
+  ns.tprint("  --strictBootstrapClassMatch t|f Only switch away if class matches exactly (default true)");
   ns.tprint("");
   ns.tprint("Notes");
-  ns.tprint("  Pass-through args after `--` are forwarded to early daemon(s).");
-  ns.tprint("  Example: run /bin/bootstrap.js -- n00dles money");
+  ns.tprint("  Args after `--` are forwarded to stage scripts.");
 }
 ```
 /* == END FILE == */
@@ -1161,15 +1717,21 @@ export async function main(ns) {
     ns.disableLog("ALL");
 
     const flags = ns.flags([
-        ["help", false], // --help flag for inline usage info
+        ["help", false],
+        ["tick", 10_000],          // resync interval
+        ["minRam", 2],             // skip hosts below this max RAM
+        ["reserveFrac", 0.05],     // leave this fraction of FREE ram unused on each host
+        ["verbose", false],        // extra logging
+        ["killAll", false],        // if true, killall(host) when redeploying (NPC-only, still skips pserv/home)
     ]);
 
     if (flags.help) {
         printHelp(ns);
         return;
     }
+
     // Positional args
-    const target = flags._[0] || "omega-net";
+    const target = String(flags._[0] || "omega-net");
     const mode = String(flags._[1] || "xp").toLowerCase();
     const workerScript = "botnet/remote-hgw.js";
 
@@ -1180,73 +1742,137 @@ export async function main(ns) {
 
     ns.tprint(`[OK] Botnet HGW sync started. Target: ${target} | Mode: ${mode.toUpperCase()}`);
 
-    const lastRam = {};
+    const lastMaxRam = {};       // remember last seen MAX ram (for “RAM upgraded” redeploy)
+    const failStreak = {};       // per-host exponential backoff when exec keeps failing
+    const nextTryAt = {};        // per-host next allowed attempt time (ms)
 
     while (true) {
+        const now = Date.now();
+
         // IMPORTANT: refresh purchased servers EVERY cycle (pserv-manager can add/upgrade them anytime)
         const pservs = new Set(ns.getPurchasedServers());
         const allServers = getAllServers(ns);
+
         for (const host of allServers) {
-            // Always skip home
+            // Skip home
             if (host === "home") continue;
-            // Always skip purchased servers (dynamic)
+
+            // Skip purchased servers (dynamic) + belt-and-suspenders prefix check
             if (pservs.has(host)) continue;
-            // Belt-and-suspenders: if your naming convention is pserv-#, skip by prefix too.
-            // This protects you during the tiny window where a server is purchased but
-            // ns.getPurchasedServers() result hasn't "settled" yet (rare, but harmless).
             if (host.startsWith("pserv-")) continue;
+
             if (!ns.hasRootAccess(host)) continue;
+
             const maxRam = ns.getServerMaxRam(host);
-            if (maxRam < 2) {
-                ns.print(`[WARN] Skipping ${host}: only ${maxRam}GB RAM`);
+            if (maxRam < Number(flags.minRam)) {
+                if (flags.verbose) ns.print(`[skip] ${host}: maxRam=${maxRam}GB < minRam=${flags.minRam}GB`);
                 continue;
             }
 
-            // Check if the worker is already running on this host for this target+mode combo
-            const running = ns.isRunning(workerScript, host, target, mode);
-            const previousRam = lastRam[host] ?? 0;
+            // Backoff gate (prevents log spam + tight loops when a host can’t run the worker yet)
+            if ((nextTryAt[host] ?? 0) > now) continue;
+
+            const prevMax = lastMaxRam[host] ?? 0;
+
+            // “Expected running” check (args-sensitive)
+            const runningExpected = ns.isRunning(workerScript, host, target, mode);
+
+            // Also detect any stale instances of the worker (different args) consuming RAM
+            const processes = ns.ps(host);
+            const stalePids = [];
+            for (const p of processes) {
+                if (p.filename === workerScript) {
+                    // Keep the one that exactly matches args; everything else is stale
+                    const args = p.args || [];
+                    const isExact = args.length === 2 && String(args[0]) === target && String(args[1]).toLowerCase() === mode;
+                    if (!isExact) stalePids.push(p.pid);
+                }
+            }
+
+            // Worker missing on host?
+            const missingOnHost = !ns.fileExists(workerScript, host);
+
             // Redeploy when:
-            //   - not running at all,
-            //   - RAM was upgraded (NPC servers can change in some BN contexts),
-            //   - or the worker script is missing on the host.
+            //  - not running (expected),
+            //  - RAM increased since last pass,
+            //  - worker missing on host,
+            //  - or stale worker instances exist (they can block RAM + cause exec failures)
             const needsDeploy =
-                !running ||
-                maxRam > previousRam ||
-                !ns.fileExists(workerScript, host);
+                !runningExpected ||
+                maxRam > prevMax ||
+                missingOnHost ||
+                stalePids.length > 0;
 
             if (!needsDeploy) continue;
 
-            ns.tprint(`+ (re)deploying HGW on ${host}: RAM ${previousRam}GB -> ${maxRam}GB`);
-            // Only kill this worker (safer than killall), but keep killall if you intentionally want it.
-            // Using killall on NPC servers is usually fine, but kill() is more polite to other tooling.
-            // ns.killall(host);
-            ns.kill(workerScript, host, target, mode);
+            ns.tprint(`+ (re)deploying HGW on ${host}: RAM ${prevMax}GB -> ${maxRam}GB`);
+
+            // Kill stale worker instances first (these are the #1 cause of “exec=0 forever” after stage switches)
+            for (const pid of stalePids) ns.kill(pid);
+
+            // Kill the “expected” worker too, if it’s running (ensures clean thread recalculation)
+            if (runningExpected) ns.kill(workerScript, host, target, mode);
+
+            // Optional nuclear option (still safe because we never touch home/pservs here)
+            if (flags.killAll) ns.killall(host);
+
+            // Ensure script exists on host
             const ok = await ns.scp(workerScript, host);
             if (!ok) {
                 ns.tprint(`[X] Failed to SCP ${workerScript} to ${host}`);
+                bumpBackoff(host, failStreak, nextTryAt, now);
                 continue;
             }
 
+            // IMPORTANT FIX: threads based on FREE ram, not MAX ram
             const scriptRam = ns.getScriptRam(workerScript);
-            const threads = Math.floor(maxRam / scriptRam);
+            const usedRam = ns.getServerUsedRam(host);
+            const freeRam = Math.max(0, maxRam - usedRam);
+
+            // Leave a little breathing room so we don’t thrash if something else starts on the host
+            const usable = freeRam * (1 - Number(flags.reserveFrac));
+            const threads = Math.floor(usable / scriptRam);
 
             if (threads < 1) {
-                ns.tprint(`[WARN] ${host}: not enough RAM for even 1 thread.`);
+                ns.tprint(
+                    `[WARN] ${host}: not enough FREE RAM. max=${maxRam} used=${usedRam.toFixed(1)} free=${freeRam.toFixed(
+                        1
+                    )} script=${scriptRam.toFixed(1)}`
+                );
+                bumpBackoff(host, failStreak, nextTryAt, now);
+                // still record maxRam so “RAM upgraded” logic doesn’t spam redeploy messages
+                lastMaxRam[host] = maxRam;
                 continue;
             }
 
             const pid = ns.exec(workerScript, host, threads, target, mode);
             if (pid === 0) {
-                ns.tprint(`[X] Failed to start ${workerScript} on ${host}`);
+                // This is the actionable diagnostic you were missing
+                ns.tprint(
+                    `[X] Failed to start ${workerScript} on ${host} | threads=${threads} max=${maxRam} used=${usedRam.toFixed(
+                        1
+                    )} free=${freeRam.toFixed(1)} scriptRam=${scriptRam.toFixed(1)}`
+                );
+                bumpBackoff(host, failStreak, nextTryAt, now);
                 continue;
             }
 
-            lastRam[host] = maxRam;
-            ns.print(`[OK] ${host}: running ${workerScript} x${threads} vs ${target} [${mode}]`);
+            // Success: reset backoff + remember RAM
+            failStreak[host] = 0;
+            nextTryAt[host] = 0;
+            lastMaxRam[host] = maxRam;
+
+            if (flags.verbose) {
+                ns.tprint(`[OK] ${host}: running ${workerScript} x${threads} vs ${target} [${mode}] (pid=${pid})`);
+            } else {
+                ns.print(`[OK] ${host}: running ${workerScript} x${threads} vs ${target} [${mode}]`);
+            }
         }
-        await ns.sleep(10_000); // every 10s, resync
+
+        await ns.sleep(Number(flags.tick));
     }
 }
+
 /** Breadth-first search of the network */
 function getAllServers(ns) {
     const visited = new Set();
@@ -1264,22 +1890,36 @@ function getAllServers(ns) {
     return Array.from(visited);
 }
 
+/**
+ * Exponential backoff per-host to avoid tight “redeploy spam” loops when exec keeps failing.
+ * Backoff: 10s, 20s, 40s, 80s, ... up to 5 minutes.
+ */
+function bumpBackoff(host, failStreak, nextTryAt, nowMs) {
+    const s = (failStreak[host] ?? 0) + 1;
+    failStreak[host] = s;
+
+    const base = 10_000;
+    const delay = Math.min(300_000, base * Math.pow(2, Math.min(8, s - 1)));
+    nextTryAt[host] = nowMs + delay;
+}
+
 function printHelp(ns) {
     ns.tprint("/bin/botnet-hgw-sync.js");
     ns.tprint("");
     ns.tprint("Description");
-    ns.tprint("  Keep /botnet/remote-hgw.js deployed on all rooted NPC servers.");
-    ns.tprint("  Skips home and purchased servers (pserv-*) so they can be managed by batchers.");
+    ns.tprint("  Keep botnet/remote-hgw.js deployed on all rooted NPC servers.");
+    ns.tprint("  Skips home and purchased servers (pserv-*) so batchers/pserv-manager own those.");
+    ns.tprint("  FIXED: threads are computed from FREE RAM (max-used), so it won’t loop forever after stage switches.");
+    ns.tprint("  FIXED: kills stale remote-hgw.js instances with mismatched args that can block RAM.");
     ns.tprint("");
     ns.tprint("Notes");
-    ns.tprint("  Target defaults to omega-net when no argument is provided.");
-    ns.tprint("  Mode controls remote behavior: \"xp\" (default) or \"money\".");
-    ns.tprint("  Requires /botnet/remote-hgw.js to exist on home before running.");
+    ns.tprint('  Target defaults to "omega-net" when no argument is provided.');
+    ns.tprint('  Mode controls worker behavior: "xp" (default) or "money".');
+    ns.tprint("  Requires botnet/remote-hgw.js to exist on home before running.");
     ns.tprint("");
     ns.tprint("Syntax");
-    ns.tprint("  run /bin/botnet-hgw-sync.js [target] [mode] [--help]");
+    ns.tprint("  run /bin/botnet-hgw-sync.js [target] [mode] [--tick ms] [--minRam gb] [--reserveFrac 0.05] [--verbose true] [--killAll true] [--help]");
 }
-// change to exclude pservs from sync targets on upgrade/purchase
 ```
 /* == END FILE == */
 
@@ -1293,33 +1933,41 @@ const disabledTypes = new Set();
  *
  * Finds coding contracts across all discovered hosts and attempts to solve them
  * using the solver library in lib/sovlers.js.
+ *
+ * DROP-IN UPDATE:
+ *  - Does NOT scan purchased servers (pserv-*) to avoid delete/rebuy race crashes.
+ *  - Does NOT scan "darkweb".
+ *  - Adds safe guards around host existence + ls() to prevent "Invalid hostname" runtime errors.
  */
 
 export function printHelp(ns) {
-    ns.tprint([
-        "bin/find-and-solve.js",
-        "Description:",
-        "  Scans the network for .cct files and attempts to solve them using lib/sovlers.js.",
-        "",
-        "Usage:",
-        "  run bin/find-and-solve.js [--once] [--interval ms] [--timeout ms] [--no-worker]",
-        "                                [--dry-run] [--host <name>] [--type <substring>]",
-        "",
-        "Options:",
-        "  --help         Show this help and exit.",
-        "  --once         Run one pass and exit (default: loop forever).",
-        "  --interval     Sleep time between passes in ms (default: 60000).",
-        "  --timeout      Max milliseconds per solver when using Worker (default: 5000).",
-        "  --no-worker    Run solvers directly (more compatible, no timeout protection).",
-        "  --dry-run      Print what would be attempted, but don't call attempt().",
-        "  --host         Only check contracts on this host (exact match).",
-        "  --type         Only attempt contracts whose type includes this substring (case-insensitive).",
-        "  --quiet        Reduce printing (still prints rewards/errors to terminal).",
-        "",
-        "Notes:",
-        "  - If a solver times out in Worker mode, try increasing --timeout or using --no-worker.",
-        "  - If a solver returns the wrong answer once, this script disables that solver type for the run.",
-    ].join("\n"));
+    ns.tprint(
+        [
+            "bin/find-and-solve.js",
+            "Description:",
+            "  Scans the network for .cct files and attempts to solve them using lib/sovlers.js.",
+            "",
+            "Usage:",
+            "  run bin/find-and-solve.js [--once] [--interval ms] [--timeout ms] [--no-worker]",
+            "                                [--dry-run] [--host <name>] [--type <substring>]",
+            "",
+            "Options:",
+            "  --help         Show this help and exit.",
+            "  --once         Run one pass and exit (default: loop forever).",
+            "  --interval     Sleep time between passes in ms (default: 60000).",
+            "  --timeout      Max milliseconds per solver when using Worker (default: 5000).",
+            "  --no-worker    Run solvers directly (more compatible, no timeout protection).",
+            "  --dry-run      Print what would be attempted, but don't call attempt().",
+            "  --host         Only check contracts on this host (exact match).",
+            "  --type         Only attempt contracts whose type includes this substring (case-insensitive).",
+            "  --quiet        Reduce printing (still prints rewards/errors to terminal).",
+            "",
+            "Notes:",
+            "  - If a solver times out in Worker mode, try increasing --timeout or using --no-worker.",
+            "  - If a solver returns the wrong answer once, this script disables that solver type for the run.",
+            "  - This script skips purchased servers (pserv-*) and 'darkweb' to avoid hostname race errors.",
+        ].join("\n")
+    );
 }
 
 export async function main(ns) {
@@ -1369,16 +2017,31 @@ export function getContracts(ns, flags) {
     for (const host of getAllHosts(ns)) {
         if (hostFilter && host !== hostFilter) continue;
 
-        for (const file of ns.ls(host, ".cct")) {
-            const type = ns.codingcontract.getContractType(file, host);
+        // Extra safety: host might disappear (pserv upgrade window, etc.)
+        if (!ns.serverExists(host)) continue;
+
+        for (const file of safeLs(ns, host, ".cct")) {
+            let type = "";
+            try {
+                type = ns.codingcontract.getContractType(file, host);
+            } catch (_e) {
+                continue; // skip unreadable / race
+            }
 
             if (typeFilter && !type.toLowerCase().includes(typeFilter)) continue;
+
+            let triesRemaining = 0;
+            try {
+                triesRemaining = ns.codingcontract.getNumTriesRemaining(file, host);
+            } catch (_e) {
+                triesRemaining = 0;
+            }
 
             contracts.push({
                 host,
                 file,
                 type,
-                triesRemaining: ns.codingcontract.getNumTriesRemaining(file, host),
+                triesRemaining,
             });
         }
     }
@@ -1387,20 +2050,35 @@ export function getContracts(ns, flags) {
 
 export async function attemptContract(ns, contract, flags) {
     if (disabledTypes.has(contract.type)) {
-        if (!flags.quiet) ns.print(`SKIP: Solver disabled for "${contract.type}" (previous failure this run).`);
+        if (!flags.quiet)
+            ns.print(
+                `SKIP: Solver disabled for "${contract.type}" (previous failure this run).`
+            );
         return;
-        }
+    }
 
     const solver = solvers[contract.type];
     if (!solver) {
-
-        if (!flags.quiet) ns.print(`WARNING: No solver for "${contract.type}" on ${contract.host}`);
+        if (!flags.quiet)
+            ns.print(
+                `WARNING: No solver for "${contract.type}" on ${contract.host}`
+            );
         return;
     }
 
     if (!flags.quiet) ns.print("Attempting " + JSON.stringify(contract, null, 2));
 
-    const data = ns.codingcontract.getData(contract.file, contract.host);
+    let data;
+    try {
+        data = ns.codingcontract.getData(contract.file, contract.host);
+    } catch (e) {
+        ns.print(
+            `ERROR reading data for "${contract.type}" on ${contract.host}: ${String(
+                e
+            )}`
+        );
+        return;
+    }
 
     try {
         const solution = flags["no-worker"]
@@ -1422,23 +2100,40 @@ export async function attemptContract(ns, contract, flags) {
         }
 
         if (flags["dry-run"]) {
-            ns.tprint(`[DRY-RUN] Would attempt "${contract.type}" on ${contract.host}:${contract.file} with solution: ${formatSolution(solution)}`);
+            ns.tprint(
+                `[DRY-RUN] Would attempt "${contract.type}" on ${contract.host}:${contract.file} with solution: ${formatSolution(
+                    solution
+                )}`
+            );
             return;
         }
 
-        const reward = ns.codingcontract.attempt(solution, contract.file, contract.host, { returnReward: true });
+        const reward = ns.codingcontract.attempt(
+            solution,
+            contract.file,
+            contract.host,
+            { returnReward: true }
+        );
 
         if (reward) {
-            ns.tprint(`${reward} for solving "${contract.type}" on ${contract.host}`);
+            ns.tprint(
+                `${reward} for solving "${contract.type}" on ${contract.host}`
+            );
             ns.print(`${reward} for solving "${contract.type}" on ${contract.host}`);
         } else {
-            ns.tprint(`ERROR: Failed to solve "${contract.type}" on ${contract.host} (${contract.file})`);
+            ns.tprint(
+                `ERROR: Failed to solve "${contract.type}" on ${contract.host} (${contract.file})`
+            );
             // Disable this solver type for this run (prevents burning tries on the same wrong solver)
-           disabledTypes.add(contract.type);
+            disabledTypes.add(contract.type);
         }
     } catch (error) {
-        ns.print(`ERROR solving "${contract.type}" on ${contract.host}: ${String(error)}`);
-        ns.tprint(`ERROR solving "${contract.type}" on ${contract.host}: ${String(error)}`);
+        ns.print(
+            `ERROR solving "${contract.type}" on ${contract.host}: ${String(error)}`
+        );
+        ns.tprint(
+            `ERROR solving "${contract.type}" on ${contract.host}: ${String(error)}`
+        );
     }
 }
 
@@ -1451,22 +2146,58 @@ function formatSolution(solution) {
     }
 }
 
+/**
+ * Safe ls wrapper:
+ * - avoids crashes if host vanishes mid-loop (pserv delete/rebuy window)
+ */
+function safeLs(ns, host, pattern) {
+    try {
+        if (!ns.serverExists(host)) return [];
+        return ns.ls(host, pattern);
+    } catch (_e) {
+        return [];
+    }
+}
+
+/**
+ * BFS scan of the network, cached for script lifetime.
+ *
+ * DROP-IN UPDATE:
+ *  - Excludes purchased servers (ns.getPurchasedServers + "pserv-" prefix)
+ *  - Excludes "darkweb"
+ */
 function getAllHosts(ns) {
     // Cache for script lifetime (same as original intent)
-    getAllHosts.cache ||= {};
-    const scanned = getAllHosts.cache;
+    getAllHosts.cache ||= null;
+    if (getAllHosts.cache) return getAllHosts.cache;
 
+    const scanned = new Set();
     const toScan = ["home"];
+
+    // Purchased servers can appear/disappear during upgrades. Exclude them.
+    const pservs = new Set(ns.getPurchasedServers());
+
     while (toScan.length > 0) {
         const host = toScan.shift();
-        scanned[host] = true;
+        if (scanned.has(host)) continue;
+
+        // Race-safe: host might not exist (during pserv upgrade churn)
+        if (!ns.serverExists(host)) continue;
+
+        // Exclusions
+        if (host === "darkweb") continue;
+        if (pservs.has(host)) continue;
+        if (host.startsWith("pserv-")) continue;
+
+        scanned.add(host);
 
         for (const nextHost of ns.scan(host)) {
-            if (!(nextHost in scanned)) toScan.push(nextHost);
+            if (!scanned.has(nextHost)) toScan.push(nextHost);
         }
     }
 
-    return Object.keys(scanned);
+    getAllHosts.cache = Array.from(scanned);
+    return getAllHosts.cache;
 }
 
 /**
@@ -1490,18 +2221,30 @@ async function runInWebWorker(fn, args, maxMs = 5000) {
 
         const timer = setTimeout(() => {
             if (!finished) reject(`${maxMs} ms elapsed.`);
-            try { worker.terminate(); } catch { /* noop */ }
+            try {
+                worker.terminate();
+            } catch {
+                /* noop */
+            }
         }, maxMs);
 
         worker.onmessageerror = (e) => {
             clearTimeout(timer);
-            try { worker.terminate(); } catch { /* noop */ }
+            try {
+                worker.terminate();
+            } catch {
+                /* noop */
+            }
             reject(`Worker message error: ${String(e)}`);
         };
 
         worker.onerror = (e) => {
             clearTimeout(timer);
-            try { worker.terminate(); } catch { /* noop */ }
+            try {
+                worker.terminate();
+            } catch {
+                /* noop */
+            }
             reject(`Worker error: ${e?.message || String(e)}`);
         };
 
@@ -1520,7 +2263,9 @@ function makeWorker(workerFunction, cb) {
         };
     `;
 
-    const workerBlob = new Blob([workerSrc], { type: "application/javascript; charset=utf-8" });
+    const workerBlob = new Blob([workerSrc], {
+        type: "application/javascript; charset=utf-8",
+    });
     const workerBlobURL = URL.createObjectURL(workerBlob);
     const worker = new Worker(workerBlobURL);
 
@@ -1601,6 +2346,7 @@ const FLAGS = [
   ["pserv", "bin/pserv-manager.js"],
   ["trader", "bin/basic-trader.js"],
   ["gangManager", "bin/gang-manager.js"],
+  ["bladeburnerManager", "/bin/bladeburner-manager.js"],
   ["intTrainer", "bin/intelligence-trainer.js"],
 
 
@@ -1670,8 +2416,10 @@ export async function main(ns) {
     pserv: String(flags.pserv),
     trader: String(flags.trader),
     gangManager: String(flags.gangManager),
+    bladeburnerManager: String(flags.bladeburnerManager),
     intTrainer: String(flags.intTrainer),
     darkwebBuyer: String(flags.darkwebBuyer),
+
 
     // bbOS service enablement
     services: !!flags.services,
@@ -1885,7 +2633,7 @@ function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
     gangManager: !!effective.gangManager,
     intTrainer: !!effective.intTrainer,
     darkwebBuyer: !!effective.darkwebBuyer,
-
+    bladeburnerManager: !!effective.bladeburnerManager, // NEW
     backdoorJob: !!effective.backdoorJob,
     contractsJob: !!effective.contractsJob,
   };
@@ -1899,6 +2647,7 @@ function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
     `trader=${cfg.servicesEnabled.trader ? "1" : "0"}`,
     `gangManager=${cfg.servicesEnabled.gangManager ? "1" : "0"}`,
     `intTrainer=${cfg.servicesEnabled.intTrainer ? "1" : "0"}`,
+    `bladeburnerManager=${cfg.servicesEnabled.bladeburnerManager ? "1" : "0"}`,
     `darkwebBuyer=${cfg.servicesEnabled.darkwebBuyer ? "1" : "0"}`,
     `backdoorJob=${cfg.servicesEnabled.backdoorJob ? "1" : "0"}`,
     `contractsJob=${cfg.servicesEnabled.contractsJob ? "1" : "0"}`,
@@ -1913,6 +2662,7 @@ function applyServiceEnablement(ns, cfg, state, msgsOrNull) {
       `pserv=${cfg.servicesEnabled.pserv ? "ON" : "OFF"} ` +
       `trader=${cfg.servicesEnabled.trader ? "ON" : "OFF"} ` +
       `gangManager=${cfg.servicesEnabled.gangManager ? "ON" : "OFF"} ` +
+      `bladeburnerManager=${cfg.servicesEnabled.bladeburnerManager ? "ON" : "OFF"} ` +
       `intTrainer=${cfg.servicesEnabled.intTrainer ? "ON" : "OFF"} ` +
       `darkwebBuyer=${cfg.servicesEnabled.darkwebBuyer ? "ON" : "OFF"} ` +
       `backdoorJob=${cfg.servicesEnabled.backdoorJob ? "ON" : "OFF"} ` +
@@ -2237,6 +2987,148 @@ function printHelp(ns) {
   ns.tprint("");
   ns.tprint("Syntax");
   ns.tprint("  run /bin/darkweb-auto-buyer.js [--help]");
+}
+```
+/* == END FILE == */
+
+/* == FILE: bin/early-money.js == */
+```js
+/**
+ * /bin/early-money.js
+ *
+ * Description
+ *  Ultra-light early-game money script for low-RAM homes.
+ *  Runs a simple HWG loop on a single target with no imports and no Singularity.
+ *  Exits cleanly once home MAX RAM reaches a threshold (bootstrap handles stage switching).
+ *
+ * Notes
+ *  - Designed to be launched by /bin/bootstrap.js as Stage A.
+ *  - Avoids ns.singularity entirely to keep RAM very low.
+ *  - If you don't have root on the target yet, it will idle until you do.
+ *
+ * Syntax
+ *  run /bin/early-money.js
+ *  run /bin/early-money.js --target n00dles --stopAtRam 64
+ *  run /bin/early-money.js --minMoneyFrac 0.85 --maxSecDelta 5
+ *  run /bin/early-money.js --help
+ */
+
+/** @param {NS} ns */
+const FLAGS = [
+    ["help", false],
+
+    // Target + behavior
+    ["target", "n00dles"],
+    ["minMoneyFrac", 0.85], // grow until money >= this * maxMoney
+    ["maxSecDelta", 5],     // weaken until (sec - minSec) <= this
+
+    // Timing / exit
+    ["sleep", 200],
+    ["stopAtRam", 64],      // exit when home MAX RAM >= this (bootstrap will switch stages)
+];
+
+export async function main(ns) {
+    const flags = ns.flags(FLAGS);
+    if (flags.help) {
+        printHelp(ns);
+        return;
+    }
+
+    ns.disableLog("ALL");
+
+    const target = String(flags.target || "n00dles");
+    const minMoneyFrac = clamp01(Number(flags.minMoneyFrac ?? 0.85));
+    const maxSecDelta = Math.max(0, Number(flags.maxSecDelta ?? 5));
+    const sleep = Math.max(50, Number(flags.sleep) || 200);
+    const stopAtRam = Math.max(1, Number(flags.stopAtRam) || 64);
+
+    while (true) {
+        // Exit condition (bootstrap handles next stage)
+        const homeMax = ns.getServerMaxRam("home");
+        if (homeMax >= stopAtRam) {
+            ns.tprint(`[early] Home MAX RAM ${homeMax}GB >= ${stopAtRam}GB -> exiting (bootstrap will switch stages)`);
+            return;
+        }
+
+        // If we can't hack the target yet, do nothing (cheap idle)
+        if (!safeBool(() => ns.hasRootAccess(target), false)) {
+            await ns.sleep(1000);
+            continue;
+        }
+
+        // Decide action based on server state
+        const maxMoney = safeNum(() => ns.getServerMaxMoney(target), 0);
+        const money = safeNum(() => ns.getServerMoneyAvailable(target), 0);
+        const minSec = safeNum(() => ns.getServerMinSecurityLevel(target), 1);
+        const sec = safeNum(() => ns.getServerSecurityLevel(target), minSec);
+        const secDelta = sec - minSec;
+
+        if (secDelta > maxSecDelta) {
+            await ns.weaken(target);
+            await ns.sleep(sleep);
+            continue;
+        }
+
+        if (maxMoney > 0 && money / maxMoney < minMoneyFrac) {
+            await ns.grow(target);
+            await ns.sleep(sleep);
+            continue;
+        }
+
+        // Otherwise hack for cash
+        await ns.hack(target);
+        await ns.sleep(sleep);
+    }
+}
+
+// ------------------------------------------------------------
+// Utils
+// ------------------------------------------------------------
+
+function clamp01(x) {
+    x = Number(x);
+    if (!Number.isFinite(x)) return 0;
+    return Math.min(1, Math.max(0, x));
+}
+
+function safeNum(fn, fallback) {
+    try {
+        const v = Number(fn());
+        return Number.isFinite(v) ? v : fallback;
+    } catch {
+        return fallback;
+    }
+}
+
+function safeBool(fn, fallback) {
+    try { return Boolean(fn()); } catch { return fallback; }
+}
+
+/** @param {NS} ns */
+function printHelp(ns) {
+    ns.tprint("/bin/early-money.js");
+    ns.tprint("");
+    ns.tprint("Description");
+    ns.tprint("  Ultra-light early-game money script for low-RAM homes.");
+    ns.tprint("  Runs a simple HWG loop on one target with no imports and no Singularity.");
+    ns.tprint("  Exits once home MAX RAM reaches a threshold (bootstrap handles stage switching).");
+    ns.tprint("");
+    ns.tprint("Notes");
+    ns.tprint("  - If you do not have root on the target yet, it will idle.");
+    ns.tprint("  - Keep this tiny: do NOT add ns.singularity calls here (they are RAM-expensive).");
+    ns.tprint("");
+    ns.tprint("Syntax");
+    ns.tprint("  run /bin/early-money.js");
+    ns.tprint("  run /bin/early-money.js --target n00dles --stopAtRam 64");
+    ns.tprint("  run /bin/early-money.js --minMoneyFrac 0.9 --maxSecDelta 2");
+    ns.tprint("  run /bin/early-money.js --help");
+    ns.tprint("");
+    ns.tprint("Flags");
+    ns.tprint("  --target <host>            Target to farm (default n00dles)");
+    ns.tprint("  --minMoneyFrac <0..1>      Grow until money >= frac*max (default 0.85)");
+    ns.tprint("  --maxSecDelta <n>          Weaken until sec-minSec <= n (default 5)");
+    ns.tprint("  --sleep <ms>               Extra delay between cycles (default 200)");
+    ns.tprint("  --stopAtRam <gb>           Exit when home MAX RAM >= this (default 64)");
 }
 ```
 /* == END FILE == */
@@ -4056,14 +4948,14 @@ function choosePrimaryTarget(ns) {
     const h = scored[i];
     ns.tprint(
       `${i + 1}. ${h.host} | ` +
-        `Score=${h.score.toExponential(2)} | ` +
-        `Money=${fmtMoney(ns, h.maxMoney)} | ` +
-        `ReqHack=${h.reqHack} | ` +
-        `Chance=${(h.chance * 100).toFixed(1)}% | ` +
-        `Sec=${h.minSec.toFixed(1)} | ` +
-        `T=${(h.tHack / 1000).toFixed(1)}s | ` +
-        `hackRatio=${(h.hackRatio * 100).toFixed(0)}% | ` +
-        `$/sec=${fmtMoney(ns, h.moneyPerSec * 1000)}`
+      `Score=${h.score.toExponential(2)} | ` +
+      `Money=${fmtMoney(ns, h.maxMoney)} | ` +
+      `ReqHack=${h.reqHack} | ` +
+      `Chance=${(h.chance * 100).toFixed(1)}% | ` +
+      `Sec=${h.minSec.toFixed(1)} | ` +
+      `T=${(h.tHack / 1000).toFixed(1)}s | ` +
+      `hackRatio=${(h.hackRatio * 100).toFixed(0)}% | ` +
+      `$/sec=${fmtMoney(ns, h.moneyPerSec * 1000)}`
     );
   }
 
@@ -4153,11 +5045,11 @@ function chooseXpTarget(ns, primary) {
     const h = scored[i];
     ns.tprint(
       `${i + 1}. ${h.host} | ` +
-        `XPScore=${h.score.toExponential(2)} | ` +
-        `ReqHack=${h.reqHack} | ` +
-        `Chance=${(h.chance * 100).toFixed(1)}% | ` +
-        `T=${(h.tHack / 1000).toFixed(1)}s | ` +
-        `hackRatio=${(h.hackRatio * 100).toFixed(0)}%`
+      `XPScore=${h.score.toExponential(2)} | ` +
+      `ReqHack=${h.reqHack} | ` +
+      `Chance=${(h.chance * 100).toFixed(1)}% | ` +
+      `T=${(h.tHack / 1000).toFixed(1)}s | ` +
+      `hackRatio=${(h.hackRatio * 100).toFixed(0)}%`
     );
   }
 
@@ -4272,11 +5164,11 @@ export async function main(ns) {
   ns.tprint(
     USE_LOW_RAM_MODE
       ? `Low-RAM batch mode ENABLED for timed-net-batcher2.js (home=${homeMaxRam.toFixed(
-          1
-        )}GB, min pserv=${minPservRam || 0}GB).`
+        1
+      )}GB, min pserv=${minPservRam || 0}GB).`
       : `Full batch mode (no --lowram) for timed-net-batcher2.js (home=${homeMaxRam.toFixed(
-          1
-        )}GB, min pserv=${minPservRam || 0}GB).`
+        1
+      )}GB, min pserv=${minPservRam || 0}GB).`
   );
 
   const override = flags._[0] || null;
@@ -4311,12 +5203,17 @@ export async function main(ns) {
   //  - corp/agri-sales.js
   ns.tprint(
     "STARTUP-HOME: Killing all processes on home " +
-      "(except startup + corp/agri-structure.js + corp/agri-inputs.js + corp/agri-sales.js)."
+    "(except startup and bootstrap.js)."
   );
 
   const myPid = ns.pid;
 
-  const keepFiles = new Set(["corp/agri-structure.js", "corp/agri-inputs.js", "corp/agri-sales.js"]);
+  // Keep bootstrap AND controller safe from being killed by startup-home-advanced.
+  const keepFiles = new Set([
+    "bin/bootstrap.js",
+    "bin/controller.js",
+  ]);
+
   const processes = ns.ps("home");
 
   for (const p of processes) {
@@ -4324,6 +5221,7 @@ export async function main(ns) {
     if (keepFiles.has(p.filename)) continue;
     ns.kill(p.pid);
   }
+
 
   await ns.sleep(200);
 
@@ -4336,14 +5234,14 @@ export async function main(ns) {
 
   ns.tprint(`ROOT PASS: rooted=${before.rooted}/${before.attempted} newly-rootable targets (attempted).`);
 
-  // Optional: if you still want /bin/root-and-deploy.js to do copying/backdoor/etc
+  // Optional: if you still want bin/root-and-deploy.js to do copying/backdoor/etc
   // we can start it, but we no longer *depend* on it for initial rooting.
-  if (ns.fileExists("/bin/root-and-deploy.js", "home")) {
-    const pid = ns.exec("/bin/root-and-deploy.js", "home", 1);
-    if (pid === 0) ns.tprint("WARN: Failed to launch /bin/root-and-deploy.js (continuing).");
+  if (ns.fileExists("bin/root-and-deploy.js", "home")) {
+    const pid = ns.exec("bin/root-and-deploy.js", "home", 1);
+    if (pid === 0) ns.tprint("WARN: Failed to launch bin/root-and-deploy.js (continuing).");
     else ns.tprint(`Started ROOT + DEPLOY daemon (pid ${pid}).`);
   } else {
-    ns.tprint("WARN: /bin/root-and-deploy.js missing; relying on startup rooting pass only.");
+    ns.tprint("WARN: bin/root-and-deploy.js missing; relying on startup rooting pass only.");
   }
 
   // Keep trying briefly in case you just bought a cracker / leveled / etc.
@@ -4370,18 +5268,18 @@ export async function main(ns) {
 
   // 1) Launch MONEY BATCHER (now target should be rooted)
   const batcherArgs = USE_LOW_RAM_MODE ? [batchTarget, "--lowram"] : [batchTarget];
-  const batcherRamCost = cost("/bin/timed-net-batcher2.js", 1);
+  const batcherRamCost = cost("bin/timed-net-batcher2.js", 1);
 
   if (isFinite(batcherRamCost)) {
     if (batcherRamCost > maxRam) {
       ns.tprint(
-        "MONEY BATCHER (/bin/timed-net-batcher2.js) alone needs " +
-          `${batcherRamCost.toFixed(1)}GB, which exceeds home RAM (${maxRam.toFixed(1)}GB).`
+        "MONEY BATCHER (bin/timed-net-batcher2.js) alone needs " +
+        `${batcherRamCost.toFixed(1)}GB, which exceeds home RAM (${maxRam.toFixed(1)}GB).`
       );
     } else {
-      const pid = ns.exec("/bin/timed-net-batcher2.js", "home", 1, ...batcherArgs);
+      const pid = ns.exec("bin/timed-net-batcher2.js", "home", 1, ...batcherArgs);
 
-      if (pid === 0) ns.tprint("Failed to launch MONEY BATCHER (/bin/timed-net-batcher2.js).");
+      if (pid === 0) ns.tprint("Failed to launch MONEY BATCHER (bin/timed-net-batcher2.js).");
       else {
         usedPlanned = ns.getServerUsedRam("home");
         ns.tprint(`Started REQUIRED MONEY BATCHER (pid ${pid}) ${JSON.stringify(batcherArgs)}`);
@@ -4392,7 +5290,7 @@ export async function main(ns) {
   // 2) Launch BOTNET after rooting is handled (FIX)
   // NOTE: This is the big race fix vs your old ordering.
   {
-    const botnetRam = cost("/bin/botnet-hgw-sync.js", 1);
+    const botnetRam = cost("bin/botnet-hgw-sync.js", 1);
 
     if (isFinite(botnetRam)) {
       const futureUsed = usedPlanned + botnetRam;
@@ -4400,9 +5298,9 @@ export async function main(ns) {
       if (futureUsed > budget) {
         ns.tprint(`Skipping BOTNET HGW SYNC - would exceed budget ${futureUsed.toFixed(1)}GB > ${budget.toFixed(1)}GB`);
       } else {
-        const pid = ns.exec("/bin/botnet-hgw-sync.js", "home", 1, hgwTarget, hgwMode);
+        const pid = ns.exec("bin/botnet-hgw-sync.js", "home", 1, hgwTarget, hgwMode);
 
-        if (pid === 0) ns.tprint("Failed to launch BOTNET HGW SYNC (/bin/botnet-hgw-sync.js).");
+        if (pid === 0) ns.tprint("Failed to launch BOTNET HGW SYNC (bin/botnet-hgw-sync.js).");
         else {
           usedPlanned = ns.getServerUsedRam("home");
           ns.tprint(`Started BOTNET HGW SYNC (pid ${pid}) [${hgwTarget}, ${hgwMode}]`);
@@ -4416,7 +5314,7 @@ export async function main(ns) {
 
   if (wantPserv) {
     plan.push({
-      name: "/bin/pserv-manager.js",
+      name: "bin/pserv-manager.js",
       threads: 1,
       args: [PSERV_TARGET_RAM],
       label: "PSERV MANAGER",
@@ -4476,7 +5374,7 @@ export async function main(ns) {
 
   ns.tprint(
     "STARTUP-HOME COMPLETE - automation online. " +
-      `Home RAM: ${maxRam.toFixed(1)}GB, reserve: ${HOME_RAM_RESERVE.toFixed(1)}GB.`
+    `Home RAM: ${maxRam.toFixed(1)}GB, reserve: ${HOME_RAM_RESERVE.toFixed(1)}GB.`
   );
 }
 
@@ -4484,7 +5382,7 @@ export async function main(ns) {
 // Help Function
 // --------------------------------------------------
 function printHelp(ns) {
-  ns.tprint("/bin/startup-home-advanced.js");
+  ns.tprint("bin/startup-home-advanced.js");
   ns.tprint("");
 
   ns.tprint("Description");
@@ -4492,11 +5390,11 @@ function printHelp(ns) {
   ns.tprint("  Picks a batch target, chooses an HGW target for XP or money,");
   ns.tprint("  kills existing scripts on home (except itself and corp/agri-* helpers),");
   ns.tprint("  ROOTS all currently-rootable servers (fixes ordering/race), then launches:");
-  ns.tprint("    - /bin/timed-net-batcher2.js");
-  ns.tprint("    - /bin/botnet-hgw-sync.js");
-  ns.tprint("  Optionally launches /bin/root-and-deploy.js as a daemon for extra deploy work.");
+  ns.tprint("    - bin/timed-net-batcher2.js");
+  ns.tprint("    - bin/botnet-hgw-sync.js");
+  ns.tprint("  Optionally launches bin/root-and-deploy.js as a daemon for extra deploy work.");
   ns.tprint("  Optional extras via --extras:");
-  ns.tprint("    - /bin/pserv-manager.js");
+  ns.tprint("    - bin/pserv-manager.js");
   ns.tprint("    - hacknet/hacknet-smart.js");
   ns.tprint("    - ui/ops-dashboard.js (one-shot dashboard)");
   ns.tprint("");
@@ -4509,17 +5407,15 @@ function printHelp(ns) {
   ns.tprint("");
 
   ns.tprint("Syntax");
-  ns.tprint("  run /bin/startup-home-advanced.js");
-  ns.tprint("  run /bin/startup-home-advanced.js --extras pserv");
-  ns.tprint("  run /bin/startup-home-advanced.js --extras pserv,hacknet,ui");
-  ns.tprint("  run /bin/startup-home-advanced.js --extras all");
-  ns.tprint("  run /bin/startup-home-advanced.js omega-net");
-  ns.tprint("  run /bin/startup-home-advanced.js --hgw xp");
-  ns.tprint("  run /bin/startup-home-advanced.js omega-net --hgw money --extras ui");
-  ns.tprint("  run /bin/startup-home-advanced.js --help");
+  ns.tprint("  run bin/startup-home-advanced.js");
+  ns.tprint("  run bin/startup-home-advanced.js --extras pserv");
+  ns.tprint("  run bin/startup-home-advanced.js --extras pserv,hacknet,ui");
+  ns.tprint("  run bin/startup-home-advanced.js --extras all");
+  ns.tprint("  run bin/startup-home-advanced.js omega-net");
+  ns.tprint("  run bin/startup-home-advanced.js --hgw xp");
+  ns.tprint("  run bin/startup-home-advanced.js omega-net --hgw money --extras ui");
+  ns.tprint("  run bin/startup-home-advanced.js --help");
 }
-
-// ooo fixed
 ```
 /* == END FILE == */
 
@@ -8940,6 +9836,8 @@ function renderReport(ns, flags, cashTrend, netWorthTrend) {
     ns.print("");
     renderHacknetSection(ns);
     ns.print("");
+    renderBladeburnerSection(ns);
+    ns.print("");
     renderServicesSection(ns, flags);
     ns.print("");
 }
@@ -9195,7 +10093,78 @@ function renderHacknetSection(ns) {
 }
 
 // -----------------------------------------------------------------------------
-// 6) bbOS Services (ASCII-only; oneshots show IDLE)
+// 6) Bladeburner - compact (BN6 / SF7+)
+// -----------------------------------------------------------------------------
+function renderBladeburnerSection(ns) {
+    ns.print("== Bladeburner ==");
+
+    // API gate (SF7+ or BN6)
+    if (!ns.bladeburner || typeof ns.bladeburner.inBladeburner !== "function") {
+        ns.print("  Status: (Bladeburner API not available)");
+        return;
+    }
+
+    const inBB = safeBool(() => ns.bladeburner.inBladeburner(), false);
+    if (!inBB) {
+        ns.print("  Status: (not in Bladeburners)");
+        return;
+    }
+
+    const rank = safeNum(() => ns.bladeburner.getRank(), NaN);
+    const sp = safeNum(() => ns.bladeburner.getSkillPoints(), NaN);
+
+    const stamina = safeArr(() => ns.bladeburner.getStamina(), [NaN, NaN]);
+    const sta = Number(stamina?.[0] ?? NaN);
+    const staMax = Number(stamina?.[1] ?? NaN);
+    const staPct = (Number.isFinite(sta) && Number.isFinite(staMax) && staMax > 0)
+        ? (sta / staMax) * 100
+        : NaN;
+
+    const city = safeStr(() => ns.bladeburner.getCity(), "n/a");
+    const chaos = safeNum(() => ns.bladeburner.getCityChaos(city), NaN);
+
+    const cur = safeObj(() => ns.bladeburner.getCurrentAction(), null);
+    const curType = String(cur?.type ?? "n/a");
+    const curName = String(cur?.name ?? "n/a");
+
+    // Next BlackOp (best-effort; safe if API differs)
+    const blackOps = safeArr(() => ns.bladeburner.getBlackOpNames(), []);
+    let nextBlackOp = null;
+    for (const name of blackOps) {
+        const remaining = safeNum(() => ns.bladeburner.getActionCountRemaining("BlackOp", name), 0);
+        if (remaining > 0) {
+            nextBlackOp = name;
+            break;
+        }
+    }
+
+    const nextReq = nextBlackOp ? safeNum(() => ns.bladeburner.getBlackOpRank(nextBlackOp), NaN) : NaN;
+    const nextChancePair = nextBlackOp
+        ? safeArr(() => ns.bladeburner.getActionEstimatedSuccessChance("BlackOp", nextBlackOp), [NaN, NaN])
+        : [NaN, NaN];
+
+    const cLo = Number(nextChancePair?.[0] ?? NaN);
+    const cHi = Number(nextChancePair?.[1] ?? NaN);
+
+    ns.print(`  Rank:     ${Number.isFinite(rank) ? ns.formatNumber(rank, 2) : "n/a"} | SP: ${Number.isFinite(sp) ? ns.formatNumber(sp, 0) : "n/a"}`);
+    ns.print(`  Stamina:  ${Number.isFinite(sta) ? ns.formatNumber(sta, 1) : "n/a"} / ${Number.isFinite(staMax) ? ns.formatNumber(staMax, 1) : "n/a"} (${Number.isFinite(staPct) ? staPct.toFixed(1) + "%" : "n/a"})`);
+    ns.print(`  City:     ${city} | Chaos: ${Number.isFinite(chaos) ? chaos.toFixed(1) : "n/a"}`);
+    ns.print(`  Action:   ${curType}:${curName}`);
+
+    if (nextBlackOp) {
+        const reqStr = Number.isFinite(nextReq) ? ns.formatNumber(nextReq, 0) : "n/a";
+        const chStr = (Number.isFinite(cLo) && Number.isFinite(cHi))
+            ? `${(cLo * 100).toFixed(1)}â€“${(cHi * 100).toFixed(1)}%`
+            : "n/a";
+        ns.print(`  Next BO:  ${nextBlackOp} | ReqRank: ${reqStr} | Chance: ${chStr}`);
+    } else {
+        ns.print("  Next BO:  (none available / all complete)");
+    }
+}
+
+
+// -----------------------------------------------------------------------------
+// 7) bbOS Services (ASCII-only; oneshots show IDLE)
 // -----------------------------------------------------------------------------
 function renderServicesSection(ns, flags) {
     ns.print("== bbOS Services ==");
@@ -9433,6 +10402,14 @@ function safeBool(fn, fallback) {
         return typeof v === "boolean" ? v : fallback;
     } catch { return fallback; }
 }
+
+function safeStr(fn, fallback) {
+    try {
+        const v = fn();
+        return (v === null || v === undefined) ? fallback : String(v);
+    } catch { return fallback; }
+}
+
 
 /** @param {NS} ns */
 function printHelp(ns) {
@@ -13852,7 +14829,7 @@ export function runDaemonLane(ns, cfg, targets, msgs) {
   const botnetScript = normScript(cfg.botnet);
   const traderScript = normScript(cfg.trader);
   const gangScript = normScript(cfg.gangManager);
-  const intTrainerScript = normScript(cfg.intTrainer);
+  const bladeburnerScript = normScript(cfg.bladeburnerManager);
 
   const pservArgs = normArgs(cfg.pservArgs || []);
 
@@ -13958,19 +14935,29 @@ export function runDaemonLane(ns, cfg, targets, msgs) {
   }
 
   // ------------------------------------------------------------
-  // intelligence trainer (idle-safe; Singularity)
+  // intelligence trainer
   // ------------------------------------------------------------
-  if (isEnabled("intTrainer")) {
-    msgs.push(
-      ...fmtEnsure(
-        ensureDaemon(ns, intTrainerScript, { host: "home", threads: 1, reserveRam: cfg.reserveRam }),
-        intTrainerScript
-      )
-    );
+  // PERMANENT: intelligence training is governed by lib/player-policy.js.
+  // Controller/daemon-lane MUST NOT spawn bin/intelligence-trainer.js.
+
+
+  // ------------------------------------------------------------
+  // Bladeburner manager (BN6 / SF7+)
+  // ------------------------------------------------------------
+  if (isEnabled("bladeburnerManager")) {
+    const bbRes = ensureDaemon(ns, bladeburnerScript, {
+      host: "home",
+      threads: 1,
+      args: [], // keep daemon args inside the script for now
+      reserveRam: cfg.reserveRam,
+    });
+
+    if (bbRes?.action && msgs) msgs.push(`[svc] bladeburner: ${bbRes.action}`);
   } else {
-    noteDisabledOnce("intTrainer", intTrainerScript);
+    noteDisabledOnce("bladeburnerManager", bladeburnerScript);
   }
 }
+
 
 function ensureWithArgsPolicy(ns, script, args, cfg, msgs) {
   let res = ensureDaemon(ns, script, {
@@ -15352,6 +16339,7 @@ export function getServiceRegistry() {
       lane: "jobs",
       notes: "Periodically scans and solves coding contracts.",
     },
+
     {
       key: "intTrainer",
       name: "Intelligence Trainer",
@@ -15362,6 +16350,18 @@ export function getServiceRegistry() {
       lane: "daemon-lane",
       notes: "Passive INT XP: create missing programs, else study CS (idle-safe).",
     },
+
+    {
+      key: "bladeburnerManager",
+      name: "Bladeburner Manager",
+      script: "/bin/bladeburner-manager.js",
+      host: "home",
+      threads: 1,
+      managed: true,
+      lane: "daemon-lane",
+      notes: "BN6 Bladeburner automation: join/skills/city/actions/blackops.",
+    },
+
 
 
     // Optional helper daemons controller may run or call into.
@@ -15406,6 +16406,7 @@ export function applyScriptOverrides(specs, flags) {
     trader: "trader",
     gangManager: "gangManager",
     intTrainer: "intTrainer",
+    bladeburnerManager: "bladeburnerManager",
     darkwebBuyer: "darkwebBuyer",
     controller: "controller",
 
@@ -15705,19 +16706,21 @@ export function ensureFactionWork(ns, faction, mode = "hacking", focus = false) 
 /*
  * lib/player-policy.js
  *
- * Description
- *  Player automation policy layer (BN4/SF4+ expected):
- *   - Pre-gang: homicide if chance >= threshold, else train lowest combat stat
- *   - Post-gang: do faction rep work for preferred factions
- *   - Safety: does NOT override company work / special actions / programs, etc.
+ * SINGLE SOURCE OF TRUTH policy (hour-sliced):
  *
- * Notes
- *  - This module contains *policy* (what to do), not Singularity primitives.
- *  - It uses lib/player.js for safe Singularity wrappers.
- *  - Designed to be called from /bin/controller.js once per tick.
+ * 1) Hacking 1-30: study "Computer Science" (bootstrap)
+ * 2) Hacking >= 30, pre-gang:
+ *    - Minute 00-09: INT slice (create missing programs else study)
+ *    - Minute 50-59: faction rep work
+ *    - Otherwise: crime logic
+ * 3) In gang:
+ *    - Minute 00-09: INT slice (same)
+ *    - Otherwise: faction rep work
+ * 4) If in Daedalus: prioritize Daedalus faction rep whenever doing faction work
  *
- * Syntax
- *  Imported module (not meant to be run directly)
+ * IMPORTANT:
+ * - This policy assumes you DISABLE the separate bin/intelligence-trainer.js daemon,
+ *   otherwise it will fight you by starting CLASS during its own slice.
  */
 
 import { inGang } from "lib/gang.js";
@@ -15728,16 +16731,65 @@ import {
   ensureGymTraining,
   pickLowestCombatStat,
   ensureFactionWork,
+  ensureStudy,
 } from "lib/player.js";
 
 export const PLAYER_POLICY_DEFAULTS = {
-  crime: "homicide",
+  // ---- Crime policy ----
   crimeMinChance: 0.55,
+  crimePreference: ["homicide", "mug", "larceny", "rob store", "shoplift"],
+
+  // ---- Cash guardrails ----
+  minCashFloor: 5_000_000,
+  gymCashFloor: 25_000_000,
+
+  // ---- Training ----
   trainCity: "Sector-12",
   trainGym: "Powerhouse Gym",
+
+  // ---- Hack bootstrap (FREE) ----
+  bootstrapHackThreshold: 30,
+  bootstrapCity: "Sector-12",
+  bootstrapUniversity: "Rothman University",
+  bootstrapCourse: "Computer Science",
+
+  // ---- Faction work ----
   factionWorkType: "hacking",
-  preferredFactions: ["Daedalus","NiteSec", "The Black Hand", "BitRunners"],
+  preferredFactions: ["Daedalus", "NiteSec", "The Black Hand", "BitRunners"],
+
+  // ---- Hour windows ----
+  hourWindows: {
+    // INT slice: top of hour through minute 9 (00-09)
+    intStartMin: 0,
+    intEndMin: 10, // exclusive
+
+    // Faction window: last 10 minutes (50-59)
+    factionStartMin: 50,
+    factionEndMin: 60, // exclusive
+  },
+
+  // ---- INT slice behavior ----
+  intSlice: {
+    // Prefer making missing programs first
+    programPriority: [
+      "BruteSSH.exe",
+      "FTPCrack.exe",
+      "relaySMTP.exe",
+      "HTTPWorm.exe",
+      "SQLInject.exe",
+      "Formulas.exe",
+    ],
+
+    // Fallback: study (INT XP)
+    city: "Sector-12",
+    university: "Rothman University",
+    course: "Computer Science",
+  },
 };
+
+// Module-level state (lives as long as the importing script instance does)
+let bootstrapActive = false;
+let lastMode = ""; // "", "BOOTSTRAP", "INT", "FACTION_WIN", "NORMAL"
 
 /**
  * Run one policy tick. Returns terminal-facing messages (only on state changes).
@@ -15749,37 +16801,142 @@ export function runHybridPlayerTick(ns, opts = PLAYER_POLICY_DEFAULTS) {
   const cfg = { ...PLAYER_POLICY_DEFAULTS, ...(opts || {}) };
   const out = [];
 
-  // If Singularity isnâ€™t available, wrappers will return ok:false/changed:false.
-  // We keep policy quiet in that case.
   const work = getCurrentWorkSafe(ns);
 
   // Guard: do not override non-automation work types.
-  // We only â€œownâ€ CRIME/GYM/CLASS/FACTION. If user is doing company/program/etc, leave it alone.
-  if (work && !["CRIME", "GYM", "CLASS", "FACTION"].includes(work.type)) {
+  // We only “own” CRIME/GYM/CLASS/FACTION/CREATE_PROGRAM.
+  if (work && !["CRIME", "GYM", "CLASS", "FACTION", "CREATE_PROGRAM"].includes(work.type)) {
     return out;
   }
 
-  if (!inGang(ns)) {
-    // Pre-gang: crime for karma if chance is decent, otherwise train.
-    const chance = getCrimeChanceSafe(ns, cfg.crime);
+  const p = safePlayer(ns);
+  const money = p.money ?? 0;
 
-    if (chance !== null && chance < cfg.crimeMinChance) {
-      const stat = pickLowestCombatStat(ns);
-      const r = ensureGymTraining(
-        ns,
-        { city: cfg.trainCity, gym: cfg.trainGym, stat },
-        false
-      );
-      if (r.changed) out.push(`[player] training ${stat} @ ${cfg.trainGym}`);
+  // IMPORTANT: ns.getPlayer() doesn't reliably expose p.hacking (it's usually p.skills.hacking)
+  // Use getHackingLevel() as the authoritative value.
+  let hacking = 0;
+  try { hacking = ns.getHackingLevel(); } catch { hacking = 0; }
+
+  const minute = safeMinute();
+  const win = cfg.hourWindows || {};
+  const inIntSlice = minute >= (win.intStartMin ?? 0) && minute < (win.intEndMin ?? 10);
+  const inFactionWindow = minute >= (win.factionStartMin ?? 50) && minute < (win.factionEndMin ?? 60);
+
+  // ------------------------------------------------------------
+  // 1) Hack bootstrap 1-30: study CS
+  // ------------------------------------------------------------
+  if (hacking < cfg.bootstrapHackThreshold) {
+    bootstrapActive = true;
+    mode(out, "BOOTSTRAP", `bootstrap: study until hacking>=${cfg.bootstrapHackThreshold}`);
+
+    const r = ensureStudy(
+      ns,
+      { city: cfg.bootstrapCity, university: cfg.bootstrapUniversity, course: cfg.bootstrapCourse },
+      false
+    );
+    if (r.changed) {
+      out.push(`[player] study: ${cfg.bootstrapCourse} @ ${cfg.bootstrapUniversity} (hacking<${cfg.bootstrapHackThreshold})`);
+    }
+    return out;
+  }
+
+  if (bootstrapActive) {
+    bootstrapActive = false;
+    // fall through immediately to normal logic
+  }
+
+  // ------------------------------------------------------------
+  // 2) INT slice: top of hour 00-09 (ALWAYS, even if in gang)
+  // ------------------------------------------------------------
+  if (inIntSlice) {
+    mode(out, "INT", "INT slice (top of hour)");
+
+    // If we are in INT slice, we own work. Prefer createProgram first.
+    const intCfg = cfg.intSlice || {};
+    const missing = (intCfg.programPriority || []).find((prog) => !ns.fileExists(prog, "home"));
+
+    if (missing && ns.singularity && typeof ns.singularity.createProgram === "function") {
+      // Only start if not already creating
+      if (work?.type !== "CREATE_PROGRAM") {
+        try { ns.singularity.createProgram(missing, false); } catch { /* ignore */ }
+        out.push(`[player] INT slice: createProgram ${missing}`);
+      }
       return out;
     }
 
-    const r = ensureCrime(ns, cfg.crime, false);
-    if (r.changed) out.push(`[player] crime: ${cfg.crime}`);
+    const r = ensureStudy(
+      ns,
+      { city: intCfg.city, university: intCfg.university, course: intCfg.course },
+      false
+    );
+    if (r.changed) out.push(`[player] INT slice: study: ${intCfg.course} @ ${intCfg.university}`);
     return out;
   }
 
-  // In gang: grind faction rep (simple heuristic).
+  // If we just left INT slice and we're still doing INT-owned work, stop it so we can switch immediately.
+  if (ns.singularity && typeof ns.singularity.stopAction === "function") {
+    if (work && (work.type === "CLASS" || work.type === "CREATE_PROGRAM")) {
+      try { ns.singularity.stopAction(); } catch { /* ignore */ }
+    }
+  }
+
+  // ------------------------------------------------------------
+  // 3) Post-bootstrap “broke” safety: crime first
+  // ------------------------------------------------------------
+  if (money < cfg.minCashFloor) {
+    mode(out, "NORMAL", "recovery: low cash => crime");
+    const crime = pickBestCrime(ns, cfg.crimePreference, cfg.crimeMinChance);
+    const r = ensureCrime(ns, crime, false);
+    if (r.changed) out.push(`[player] recovery: crime: ${crime} (cash low)`);
+    return out;
+  }
+
+  // ------------------------------------------------------------
+  // 4) Pre-gang phase
+  //    - last 10 minutes: faction rep grind
+  //    - otherwise: crime logic
+  // ------------------------------------------------------------
+  if (!inGang(ns)) {
+    if (inFactionWindow) {
+      mode(out, "FACTION_WIN", "pre-gang: faction window (last 10 min)");
+      const faction = pickRepFaction(ns, cfg.preferredFactions);
+      if (faction) {
+        const r = ensureFactionWork(ns, faction, cfg.factionWorkType, false);
+        if (r.changed) out.push(`[player] faction window: ${faction} (${cfg.factionWorkType})`);
+        return out;
+      }
+      // no faction => fall back to crime
+    }
+
+    mode(out, "NORMAL", "pre-gang: crime logic");
+
+    const crime = pickBestCrime(ns, cfg.crimePreference, cfg.crimeMinChance);
+    const chance = getCrimeChanceSafe(ns, crime);
+
+    // If chance is known and too low, train *only if* we can afford gym safely.
+    if (chance !== null && chance < cfg.crimeMinChance) {
+      if (money >= cfg.gymCashFloor) {
+        const stat = pickLowestCombatStat(ns);
+        const r = ensureGymTraining(ns, { city: cfg.trainCity, gym: cfg.trainGym, stat }, false);
+        if (r.changed) out.push(`[player] training ${stat} @ ${cfg.trainGym}`);
+        return out;
+      }
+      // Gym blocked -> crime anyway
+      const r = ensureCrime(ns, crime, false);
+      if (r.changed) out.push(`[player] crime: ${crime} (gym blocked: cash<${fmtMoney(ns, cfg.gymCashFloor)})`);
+      return out;
+    }
+
+    const r = ensureCrime(ns, crime, false);
+    if (r.changed) out.push(`[player] crime: ${crime}`);
+    return out;
+  }
+
+  // ------------------------------------------------------------
+  // 5) In gang: faction rep (Daedalus priority)
+  // ------------------------------------------------------------
+  mode(out, "NORMAL", "in gang: faction rep");
+
   const faction = pickRepFaction(ns, cfg.preferredFactions);
   if (!faction) return out;
 
@@ -15789,7 +16946,7 @@ export function runHybridPlayerTick(ns, opts = PLAYER_POLICY_DEFAULTS) {
 }
 
 /**
- * Picks the first preferred faction youâ€™re currently in, otherwise any faction.
+ * Picks Daedalus if you have it, else preferred list, else any faction.
  * @param {NS} ns
  * @param {string[]} preferred
  * @returns {string}
@@ -15797,6 +16954,8 @@ export function runHybridPlayerTick(ns, opts = PLAYER_POLICY_DEFAULTS) {
 export function pickRepFaction(ns, preferred) {
   try {
     const my = ns.getPlayer().factions || [];
+    if (my.includes("Daedalus")) return "Daedalus";
+
     for (const f of preferred || []) {
       if (my.includes(f)) return f;
     }
@@ -15804,6 +16963,56 @@ export function pickRepFaction(ns, preferred) {
   } catch (_e) {
     return "";
   }
+}
+
+/**
+ * Crime chooser: returns the first crime in preference list that meets minChance (if chance is available),
+ * otherwise falls back to the first item in list.
+ */
+function pickBestCrime(ns, preference, minChance) {
+  const prefs = (preference && preference.length)
+    ? preference
+    : ["homicide", "mug", "larceny", "rob store", "shoplift"];
+
+  for (const c of prefs) {
+    const ch = getCrimeChanceSafe(ns, c);
+    if (ch === null) return prefs[0];
+    if (ch >= minChance) return c;
+  }
+  return prefs[prefs.length - 1];
+}
+
+function safePlayer(ns) {
+  try {
+    const p = ns.getPlayer();
+    // Normalize hacking into a stable place if you ever want it later
+    const hk = (p?.skills?.hacking ?? p?.hacking);
+    return { ...p, hacking: hk };
+  } catch (_e) {
+    return { money: 0, hacking: 0 };
+  }
+}
+
+function fmtMoney(ns, v) {
+  try {
+    return "$" + ns.formatNumber(v, 2, 1e3);
+  } catch (_e) {
+    return String(v);
+  }
+}
+
+function safeMinute() {
+  try {
+    return new Date().getMinutes();
+  } catch {
+    return 0;
+  }
+}
+
+function mode(out, m, why) {
+  if (lastMode === m) return;
+  lastMode = m;
+  out.push(`[player] mode -> ${m} (${why})`);
 }
 ```
 /* == END FILE == */

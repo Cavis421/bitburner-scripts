@@ -10,6 +10,10 @@
  *  On ANY stage switch, bootstrap kills "all workers" by killing all scripts on home
  *  except an allowlist (bootstrap itself only).
  *
+ *  NEW (Player bootstrap safety):
+ *   - Periodically enforces a free Rothman CS class while hacking < threshold
+ *   - Once hacking >= threshold, kicks you out of class by starting a crime (crime-first)
+ *
  * Notes
  *  - Avoids imports to keep RAM cost tiny.
  *  - Stage1 is treated like a daemon (kept running).
@@ -40,8 +44,23 @@ const FLAGS = [
 
   // Behavior
   ["killWorkersOnSwitch", true],
-  ["exitAfterControllerStart", true],
+  // IMPORTANT: keep bootstrap alive so it can enforce player bootstrap policy.
+  // You can flip this back to true if you don’t want this behavior.
+  ["exitAfterControllerStart", false],
   ["poll", 5000],
+
+  // ------------------------------------------------------------
+  // Player bootstrap enforcement (Singularity)
+  // ------------------------------------------------------------
+  ["playerBootstrap", true],
+  ["bootstrapHackThreshold", 30],
+  ["bootstrapCity", "Sector-12"],
+  ["bootstrapUniversity", "Rothman University"],
+  ["bootstrapCourse", "Computer Science"],
+  ["bootstrapCrime", "homicide"],
+
+  // Only interfere with CLASS when we are specifically in the bootstrap course/location.
+  ["strictBootstrapClassMatch", true],
 ];
 
 export async function main(ns) {
@@ -66,6 +85,15 @@ export async function main(ns) {
 
   const killWorkersOnSwitch = !!flags.killWorkersOnSwitch;
   const exitAfterControllerStart = !!flags.exitAfterControllerStart;
+
+  // Player bootstrap cfg
+  const playerBootstrap = !!flags.playerBootstrap;
+  const bootHack = Math.max(1, Math.floor(Number(flags.bootstrapHackThreshold) || 30));
+  const bootCity = String(flags.bootstrapCity || "Sector-12");
+  const bootUni = String(flags.bootstrapUniversity || "Rothman University");
+  const bootCourse = String(flags.bootstrapCourse || "Computer Science");
+  const bootCrime = String(flags.bootstrapCrime || "homicide");
+  const strictClassMatch = !!flags.strictBootstrapClassMatch;
 
   // Args after `--` are forwarded to stage scripts (optional)
   const passthroughArgs = flags._.slice(0);
@@ -153,43 +181,105 @@ export async function main(ns) {
       return;
     }
 
-    if (isRunning(ns, controllerScript, "home")) {
-      if (exitAfterControllerStart) return;
-      await ns.sleep(poll);
-      continue;
+    // If controller isn't running, start it when affordable
+    if (!isRunning(ns, controllerScript, "home")) {
+      const cost = ns.getScriptRam(controllerScript, "home") * controllerThreads;
+      if (!Number.isFinite(cost) || cost <= 0) {
+        ns.tprint(`[bootstrap] ERROR: controller RAM cost invalid: ${controllerScript}`);
+        return;
+      }
+
+      const free = getFreeRam(ns);
+      if (free >= cost) {
+        const pid = ns.run(controllerScript, controllerThreads);
+        if (pid && pid > 0) {
+          ns.tprint(
+            `[bootstrap] started ${controllerScript} (pid=${pid}) ` +
+            `homeMax=${homeMax}GB free=${getFreeRam(ns).toFixed(1)}GB cost=${cost.toFixed(1)}GB`
+          );
+        } else {
+          ns.tprint(`[bootstrap] WARN: failed to start ${controllerScript} (ns.run returned ${pid})`);
+        }
+      }
     }
 
-    const cost = ns.getScriptRam(controllerScript, "home") * controllerThreads;
-    if (!Number.isFinite(cost) || cost <= 0) {
-      ns.tprint(`[bootstrap] ERROR: controller RAM cost invalid: ${controllerScript}`);
-      return;
+    // NEW: Periodic player bootstrap enforcement while we remain alive
+    if (playerBootstrap) {
+      enforcePlayerBootstrap(ns, {
+        hackThreshold: bootHack,
+        city: bootCity,
+        university: bootUni,
+        course: bootCourse,
+        crime: bootCrime,
+        strictClassMatch: strictClassMatch ?? true,
+      });
     }
 
-    const free = getFreeRam(ns);
-    if (free < cost) {
-      await ns.sleep(poll);
-      continue;
-    }
-
-    const pid = ns.run(controllerScript, controllerThreads);
-    if (pid && pid > 0) {
-      ns.tprint(
-        `[bootstrap] started ${controllerScript} (pid=${pid}) ` +
-        `homeMax=${homeMax}GB free=${getFreeRam(ns).toFixed(1)}GB cost=${cost.toFixed(1)}GB`
-      );
-      if (exitAfterControllerStart) return;
-    } else {
-      ns.tprint(`[bootstrap] WARN: failed to start ${controllerScript} (ns.run returned ${pid})`);
-    }
+    if (exitAfterControllerStart && isRunning(ns, controllerScript, "home")) return;
 
     await ns.sleep(poll);
   }
 }
 
 // ------------------------------------------------------------
+// Player bootstrap enforcement (no imports; tiny; defensive)
+// ------------------------------------------------------------
+function enforcePlayerBootstrap(ns, cfg) {
+  try {
+    if (!ns.singularity) return;
+    if (typeof ns.singularity.getCurrentWork !== "function") return;
+
+    // Default strict matching ON unless explicitly set to false
+    const strict = cfg.strictClassMatch !== false;
+
+    const p = ns.getPlayer();
+    const hacking = ns.getHackingLevel(); // bulletproof vs any getPlayer weirdness
+
+    const w = ns.singularity.getCurrentWork?.() || null;
+    const wType = w?.type || "";
+
+    // While hacking < threshold: ensure we are taking the free CS course (Rothman, Sector-12).
+    if (hacking < cfg.hackThreshold) {
+      // If already in CLASS, only treat it as "ok" if it's the exact bootstrap class (when strict).
+      if (wType === "CLASS") {
+        if (strict) {
+          const loc = String(w?.location || "");
+          const cls = String(w?.classType || "");
+          if (loc === cfg.university && cls === cfg.course) return;
+          // otherwise override to bootstrap course below
+        } else {
+          // legacy behavior: any class counts, avoid thrash
+          return;
+        }
+      }
+
+      // Travel to city (optional; safe)
+      if (typeof ns.singularity.travelToCity === "function" && p.city !== cfg.city) {
+        try { ns.singularity.travelToCity(cfg.city); } catch { /* ignore */ }
+      }
+
+      // Start the bootstrap course
+      if (typeof ns.singularity.universityCourse === "function") {
+        const ok = ns.singularity.universityCourse(cfg.university, cfg.course, false);
+        if (ok) ns.print(
+          `[bootstrap-player] study: ${cfg.course} @ ${cfg.university} (hacking=${hacking} < ${cfg.hackThreshold})`
+        );
+      }
+      return;
+    }
+
+    // Once hacking >= threshold: bootstrap enforcement is DONE.
+    // Controller/player-policy owns what happens next (prevents CLASS <-> CRIME ping-pong).
+    return;
+  } catch {
+    // No terminal spam; bootstrap stays resilient.
+  }
+}
+
+
+// ------------------------------------------------------------
 // Helpers (keep tiny; no imports)
 // ------------------------------------------------------------
-
 function normPath(p) {
   // Your repo uses "bin/..." paths; strip leading "/" if present.
   return String(p || "").trim().replace(/^\/+/, "");
@@ -279,10 +369,15 @@ function printHelp(ns) {
   ns.tprint("    3) start controller when home MAX RAM >= 1024GB and controller fits in FREE RAM");
   ns.tprint("  On any stage switch, kills all non-allowlisted scripts on home (\"kill all workers\").");
   ns.tprint("");
+  ns.tprint("NEW: Player bootstrap");
+  ns.tprint("  While hacking < threshold, enforce FREE Computer Science at Rothman University (Sector-12).");
+  ns.tprint("  Once hacking >= threshold, if still in that class, switch to crime.");
+  ns.tprint("");
   ns.tprint("Syntax");
   ns.tprint("  run /bin/bootstrap.js");
   ns.tprint("  run /bin/bootstrap.js --poll 2000");
-  ns.tprint("  run /bin/bootstrap.js --killWorkersOnSwitch false");
+  ns.tprint("  run /bin/bootstrap.js --playerBootstrap false");
+  ns.tprint("  run /bin/bootstrap.js --exitAfterControllerStart true");
   ns.tprint("  run /bin/bootstrap.js --help");
   ns.tprint("");
   ns.tprint("Flags");
@@ -293,8 +388,17 @@ function printHelp(ns) {
   ns.tprint("  --controller <path>           Controller script (default bin/controller.js)");
   ns.tprint("  --controllerThreads <n>       Controller threads (default 1)");
   ns.tprint("  --killWorkersOnSwitch t|f      Kill all scripts on home except bootstrap (default true)");
-  ns.tprint("  --exitAfterControllerStart t|f Exit after starting controller (default true)");
+  ns.tprint("  --exitAfterControllerStart t|f Exit after starting controller (default false)");
   ns.tprint("  --poll <ms>                    Poll interval (default 5000)");
+  ns.tprint("");
+  ns.tprint("Player bootstrap flags");
+  ns.tprint("  --playerBootstrap t|f          Enable hack<30 study enforcement (default true)");
+  ns.tprint("  --bootstrapHackThreshold <n>   Threshold (default 30)");
+  ns.tprint("  --bootstrapCity <name>         City to study in (default Sector-12)");
+  ns.tprint("  --bootstrapUniversity <name>   University (default Rothman University)");
+  ns.tprint("  --bootstrapCourse <name>       Course (default Computer Science)");
+  ns.tprint("  --bootstrapCrime <name>        Crime to switch to after threshold (default homicide)");
+  ns.tprint("  --strictBootstrapClassMatch t|f Only switch away if class matches exactly (default true)");
   ns.tprint("");
   ns.tprint("Notes");
   ns.tprint("  Args after `--` are forwarded to stage scripts.");
