@@ -779,7 +779,6 @@ solvers["Compression III: LZ Compression"] = (data) => {
 // ---------------------------------------------------------------------------
 // Square Root (BigInt)
 // ---------------------------------------------------------------------------
-// Given ~200-digit BigInt N, return sqrt(N) rounded to the nearest integer (as a string, no trailing "n").
 solvers["Square Root"] = (data) => {
     // Normalize input -> BigInt
     let n;
@@ -790,7 +789,7 @@ solvers["Square Root"] = (data) => {
         n = BigInt(s.endsWith("n") ? s.slice(0, -1) : s);
     }
 
-    if (n < 0n) return ""; // not expected, but safe
+    if (n < 0n) return "";
     if (n < 2n) return n.toString();
 
     // Integer sqrt floor via Newton's method
