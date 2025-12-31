@@ -68,15 +68,15 @@ export const PLAYER_POLICY_DEFAULTS = {
   intSlice: {
     // Prefer making missing programs first
     programPriority: [
+      "AutoLink.exe",
+      "DeepScanV1.exe",
+      "ServerProfiler.exe",
       "BruteSSH.exe",
       "FTPCrack.exe",
       "relaySMTP.exe",
       "HTTPWorm.exe",
       "SQLInject.exe",
       "Formulas.exe",
-      "AutoLink.exe",
-      "DeepScanV1.exe",
-      "ServerProfiler.exe",
     ],
 
     // Fallback: study (INT XP)
