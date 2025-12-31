@@ -147,25 +147,44 @@ export function runHybridPlayerTick(ns, opts = PLAYER_POLICY_DEFAULTS) {
   if (inIntSlice) {
     mode(out, "INT", "INT slice (top of hour)");
 
-    // If we are in INT slice, we own work. Prefer createProgram first.
-    const intCfg = cfg.intSlice || {};
-    const missing = (intCfg.programPriority || []).find((prog) => !ns.fileExists(prog, "home"));
-
-    if (missing && ns.singularity && typeof ns.singularity.createProgram === "function") {
-      // Only start if not already creating
-      if (work?.type !== "CREATE_PROGRAM") {
-        try { ns.singularity.createProgram(missing, false); } catch { /* ignore */ }
-        out.push(`[player] INT slice: createProgram ${missing}`);
+    // HARD HANDOFF: stop prior work once so INT slice reliably takes over
+    if (ns.singularity && typeof ns.singularity.stopAction === "function") {
+      if (work && ["FACTION", "CRIME", "GYM", "CLASS", "CREATE_PROGRAM"].includes(work.type)) {
+        try { ns.singularity.stopAction(); } catch { /* ignore */ }
       }
-      return out;
     }
 
+    // Re-read after stopAction to avoid stale decisions
+    const work2 = getCurrentWorkSafe(ns);
+
+    const intCfg = cfg.intSlice || {};
+
+    // Prefer creating missing programs during the slice (INT + utility)
+    const missing = (intCfg.programPriority || []).find((pp) => !ns.fileExists(pp, "home"));
+    if (missing && ns.singularity && typeof ns.singularity.createProgram === "function") {
+      let ok = false;
+      try { ok = ns.singularity.createProgram(missing, false); } catch { ok = false; }
+
+      if (ok) {
+        out.push(`[player] INT slice: createProgram ${missing}`);
+        return out; // action started; slice owns tick
+      }
+
+      // Skill gated or otherwise unavailable -> fall through to study
+      out.push(`[player] INT slice: cannot createProgram ${missing} -> fallback to study`);
+    }
+
+    // Fallback: study for INT
     const r = ensureStudy(
       ns,
       { city: intCfg.city, university: intCfg.university, course: intCfg.course },
       false
     );
+
+    // If study didn't "change", it can be because we were already in CLASS; that's fine.
     if (r.changed) out.push(`[player] INT slice: study: ${intCfg.course} @ ${intCfg.university}`);
+    else if (work2?.type !== "CLASS") out.push(`[player] INT slice: study already active or could not switch (work=${work2?.type || "NONE"})`);
+
     return out;
   }
 
