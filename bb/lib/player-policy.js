@@ -74,6 +74,9 @@ export const PLAYER_POLICY_DEFAULTS = {
       "HTTPWorm.exe",
       "SQLInject.exe",
       "Formulas.exe",
+      "AutoLink.exe",
+      "DeepScanV1.exe",
+      "ServerProfiler.exe",
     ],
 
     // Fallback: study (INT XP)
