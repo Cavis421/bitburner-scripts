@@ -9,7 +9,7 @@
  *   3) WSE asset-dashboard summary
  *   4) gang summary (or Karma-Watch fallback)
  *   5) hacknet summary
- *   6) bbOS services summary (ASCII-only; no mojibake; oneshots show IDLE)
+ *   6) bbOS services summary
  *
  * Notes
  *  - Read-only: does not start/stop services.
@@ -89,7 +89,11 @@ export async function main(ns) {
         ns.clearLog();
 
         cashTrend.sample();
-        netWorthTrend.sample();
+
+        const wseUnlocked = hasWseAccount(ns);
+        if (wseUnlocked) {
+            netWorthTrend.sample();
+        }
 
         // Safety net: one bad section shouldn't kill the whole HUD
         try {
@@ -123,9 +127,11 @@ function renderReport(ns, flags, cashTrend, netWorthTrend) {
     const [scriptMoneyPerSec] = safeArr(() => ns.getTotalScriptIncome(), [NaN]);
 
     const xpRate = readXpThroughput(ns, "data/xp-throughput.txt");
+    const wseUnlocked = hasWseAccount(ns);
+
 
     const cashDeltaPerSec = cashTrend.ratePerSec();
-    const netWorthDeltaPerSec = netWorthTrend.ratePerSec(); // may be NaN if not available
+    const netWorthDeltaPerSec = wseUnlocked ? netWorthTrend.ratePerSec() : NaN;
 
     ns.print("=================================================================");
     ns.print(`bbOS Controller Report | ${now.toLocaleTimeString()}`);
@@ -138,7 +144,7 @@ function renderReport(ns, flags, cashTrend, netWorthTrend) {
 
     let trendLine = `Income: ${padLeftShort(incomeStr, 14)}`;
 
-    if (flags.showNetWorthDelta) {
+    if (flags.showNetWorthDelta && wseUnlocked) {
         const nwStr = Number.isFinite(netWorthDeltaPerSec) ? `${fmtMoney(ns, netWorthDeltaPerSec)}/s` : "n/a";
         trendLine += ` | NetWorthΔ: ${padLeftShort(nwStr, 14)}`;
     }
