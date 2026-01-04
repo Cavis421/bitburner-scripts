@@ -1,376 +1,217 @@
 /**
  * /bin/bladeburner-manager.js
- *
- * Description
- *  BN6 Bladeburner automation daemon:
- *   - (Optional) auto-join Bladeburner division when eligible
- *   - spends skill points by priority
- *   - manages stamina (train/field analysis when low)
- *   - manages chaos (diplomacy when high)
- *   - selects best contract/operation by success chance + expected value
- *   - attempts BlackOps when rank/chance thresholds are met
- *
- * Notes
- *  - Requires Bladeburner API (BN6 or SF7+).
- *  - Safe to run even before joining: it can idle/exit cleanly.
- *  - Uses conservative success thresholds by default to avoid fail spirals.
- *
- * Syntax
- *  run /bin/bladeburner-manager.js
- *  run /bin/bladeburner-manager.js --minChance 0.7 --blackopMinChance 0.8
- *  run /bin/bladeburner-manager.js --city "Sector-12"
- *  run /bin/bladeburner-manager.js --help
  */
 
-/** @param {NS} ns */
 const FLAGS = [
     ["help", false],
-
-    // Looping
     ["loop", true],
     ["pollMs", 2500],
-
-    // Join behavior
     ["autoJoin", true],
-
-    // Action safety
-    ["minChance", 0.70],           // min success chance for contracts/ops
-    ["blackopMinChance", 0.80],    // min chance for blackops
-    ["staminaMinFrac", 0.55],      // if stamina/max below this, recover
-    ["chaosThresh", 50],           // if city chaos above this, run diplomacy
-    ["preferOps", true],           // prefer operations over contracts when both are good
-
-    // City control (optional)
-    ["city", ""],                  // if set, will try to stay here
-
-    // Skill upgrades
+    ["minChance", 0.70],            // Threshold to start an action
+    ["blackopMinChance", 0.80],
+    ["staminaMinFrac", 0.55],
+    ["chaosThresh", 50],
+    ["preferOps", true],
+    ["cityHop", true],
+    ["cityHopCooldownMs", 60_000],
     ["spendSkills", true],
+    ["lockActions", true],
+    ["lockMinFrac", 0.90],          // Don't interrupt if > 90% done
+    ["staminaResumeFrac", 0.85],
+    ["staminaHardMinFrac", 0.25],
+    ["chanceBuffer", 0.10],         // Hysteresis: Stay in action if chance > (minChance - buffer)
+    ["autoLevel", true]             // Automatically adjust action levels to match stats
 ];
+
+const norm = (t) => String(t || "").toLowerCase().replace(/s$/, "").trim();
+const isWorkAction = (t) => ["contract", "operation", "blackop", "black op"].includes(norm(t));
 
 export async function main(ns) {
     const flags = ns.flags(FLAGS);
-    if (flags.help) {
-        printHelp(ns);
-        return;
-    }
+    if (flags.help) { printHelp(ns); return; }
 
     ns.disableLog("ALL");
+    ns.ui.openTail();
 
-    if (!hasBladeburner(ns)) {
-        ns.tprint("ERROR: Bladeburner API not available (need BN6 or SF7+).");
-        return;
-    }
+    const state = { lastCitySwitchAt: 0, inRecovery: false };
 
-    // Main daemon loop
     while (true) {
-        const did = tick(ns, flags);
-
+        ns.clearLog();
+        tick(ns, flags, state);
         if (!flags.loop) break;
         await ns.sleep(Math.max(200, Number(flags.pollMs) || 2500));
-
-        // If we *can't* do anything (not joined + can't join), don't spam.
-        // (tick() already prints minimal info; keep this silent.)
-        void did;
     }
 }
 
-function tick(ns, flags) {
-    // 1) Ensure we're in Bladeburners (optional)
-    const inBB = safeBool(() => ns.bladeburner.inBladeburner(), false);
-
-    if (!inBB) {
-        if (flags.autoJoin) {
-            const joined = safeBool(() => ns.bladeburner.joinBladeburnerDivision(), false);
-            if (joined) ns.print("[bb] Joined Bladeburner division.");
-        }
-
-        const nowIn = safeBool(() => ns.bladeburner.inBladeburner(), false);
-        if (!nowIn) {
-            ns.print("[bb] Not in Bladeburners yet (idle).");
-            return false;
-        }
-    }
-
-    // 2) City preference
-    const desiredCity = String(flags.city || "").trim();
-    if (desiredCity) {
-        const cur = safeStr(() => ns.bladeburner.getCity(), "");
-        if (cur && cur !== desiredCity) {
-            safeBool(() => ns.bladeburner.switchCity(desiredCity), false);
-        }
-    }
-
-    // 3) Spend skill points
+function tick(ns, flags, state) {
     if (flags.spendSkills) spendSkillPoints(ns);
 
-    // 4) Stamina management
-    const stamina = safeObj(() => ns.bladeburner.getStamina(), [0, 0]);
-    const curSta = Number(stamina?.[0] ?? 0);
-    const maxSta = Math.max(1, Number(stamina?.[1] ?? 1));
-    const staFrac = curSta / maxSta;
+    const curAction = safeObj(() => ns.bladeburner.getCurrentAction(), { type: "Idle", name: "Idle" });
+    const curType = curAction?.type ?? "Idle";
+    const curName = curAction?.name ?? "Idle";
 
-    if (staFrac < Number(flags.staminaMinFrac)) {
-        return ensureAction(ns, "General", pickRecoveryGeneral(ns), "[bb] recovering stamina");
+    // Plural mapping for API calls
+    let typeArg = curType;
+    if (norm(curType) === "contract") typeArg = "Contracts";
+    else if (norm(curType) === "operation") typeArg = "Operations";
+    else if (norm(curType) === "black op" || norm(curType) === "blackop") typeArg = "Black Ops";
+
+    // --- 1) AUTO-LEVEL MANAGEMENT (The Thrash Fix) ---
+    // If our current action is too hard, immediately level it down so we can finish it.
+    if (flags.autoLevel && isWorkAction(curType) && norm(curType) !== "blackop") {
+        const ch = chanceInfo(ns, typeArg, curName).cons;
+        if (ch < flags.minChance - flags.chanceBuffer) {
+            const curLvl = ns.bladeburner.getActionCurrentLevel(typeArg, curName);
+            if (curLvl > 1) {
+                ns.print(`[Alert] Chance ${(ch * 100).toFixed(1)}% too low for Lvl ${curLvl}. Leveling Down.`);
+                ns.bladeburner.setActionLevel(typeArg, curName, curLvl - 1);
+                return; // Re-evaluate on next tick
+            }
+        }
     }
 
-    // 5) Chaos management (in current city)
+    // --- 2) HARD LOCK (90%+) ---
+    const tCur = isWorkAction(curType) ? safeNum(() => ns.bladeburner.getActionTime(typeArg, curName), 0) : 0;
+    const tNow = isWorkAction(curType) ? safeNum(() => ns.bladeburner.getActionCurrentTime(), 0) : 0;
+    const curFrac = tCur > 0 ? (tNow / tCur) : 0;
+
+    if (isWorkAction(curType) && flags.lockActions && curFrac > Number(flags.lockMinFrac)) {
+        ns.print(`[Status] Completing: ${curName} (${(curFrac * 100).toFixed(1)}%)`);
+        return true;
+    }
+
+    // --- 3) STAMINA RECOVERY ---
+    const stamina = safeObj(() => ns.bladeburner.getStamina(), [0, 1]);
+    const staFrac = stamina[0] / Math.max(1, stamina[1]);
+    if (!state.inRecovery && staFrac < Number(flags.staminaMinFrac)) state.inRecovery = true;
+    if (state.inRecovery && staFrac >= Number(flags.staminaResumeFrac)) state.inRecovery = false;
+
+    if (state.inRecovery) {
+        const recoveryAction = (staFrac < 0.2) ? "Training" : "Field Analysis";
+        ns.print(`[Status] Recovery Mode (${(staFrac * 100).toFixed(1)}%) -> ${recoveryAction}`);
+        return ensureAction(ns, "General", recoveryAction, "[bb] Low Stamina", flags);
+    }
+
+    // --- 4) CITY & CHAOS ---
+    handleCityHopping(ns, flags, state);
     const city = safeStr(() => ns.bladeburner.getCity(), "Sector-12");
-    const chaos = safeNum(() => ns.bladeburner.getCityChaos(city), 0);
-    if (chaos > Number(flags.chaosThresh)) {
-        // Diplomacy is the standard “reduce chaos” lever.
-        return ensureAction(ns, "General", "Diplomacy", `[bb] chaos ${chaos.toFixed(1)} in ${city} -> Diplomacy`);
+    if (safeNum(() => ns.bladeburner.getCityChaos(city), 0) > Number(flags.chaosThresh)) {
+        const prefer = pickChaosReduction(ns, Number(flags.minChance));
+        return ensureAction(ns, prefer.type, prefer.name, `[bb] Reducing Chaos`, flags);
     }
 
-    // 6) BlackOps (when available and safe)
+    // --- 5) ACTION SELECTION ---
     const blackopPick = pickBestBlackOp(ns, Number(flags.blackopMinChance));
-    if (blackopPick) {
-        return ensureAction(ns, "BlackOp", blackopPick.name, `[bb] BLACKOP ${blackopPick.name} (chance ${(blackopPick.chance * 100).toFixed(1)}%)`);
+    if (blackopPick) return ensureAction(ns, "Black Ops", blackopPick.name, `[bb] BlackOp: ${blackopPick.name}`, flags);
+
+    const bestOp = pickBestAction(ns, "Operations", Number(flags.minChance));
+    const bestContract = pickBestAction(ns, "Contracts", Number(flags.minChance));
+
+    let chosen = null;
+    if (bestOp && bestContract) {
+        chosen = (flags.preferOps || bestOp.score > bestContract.score) ? bestOp : bestContract;
+    } else {
+        chosen = bestOp || bestContract;
     }
-
-    // 7) Normal money/rank actions: operations/contracts
-    const bestOp = pickBestAction(ns, "Operation", Number(flags.minChance));
-    const bestContract = pickBestAction(ns, "Contract", Number(flags.minChance));
-
-    const preferOps = !!flags.preferOps;
-
-    const chosen =
-        pickByValue(bestOp, bestContract, { preferOps });
 
     if (chosen) {
-        return ensureAction(ns, chosen.type, chosen.name, `[bb] ${chosen.type} ${chosen.name} (chance ${(chosen.chance * 100).toFixed(1)}%)`);
+        ns.print(`[Status] Best: ${chosen.name} (${(chosen.chance * 100).toFixed(1)}%)`);
+        return ensureAction(ns, chosen.type, chosen.name, `[bb] Working`, flags);
     }
 
-    // 8) Fallback: Field Analysis (improves estimates and is always safe)
-    return ensureAction(ns, "General", "Field Analysis", "[bb] fallback -> Field Analysis");
+    // --- 6) FALLBACK ---
+    ns.print(`[Status] No safe actions > ${(flags.minChance * 100).toFixed(0)}%. Analyzing...`);
+    return ensureAction(ns, "General", "Field Analysis", "[bb] Scouting", flags);
 }
 
-// -----------------------------------------------------------------------------
-// Action picking
-// -----------------------------------------------------------------------------
+// --- LOGIC HELPERS ---
 
-function pickRecoveryGeneral(ns) {
-    // Training improves stats; Field Analysis improves chance estimates.
-    // When stamina is low, both are fine — training is a better “BN6 ramp”.
-    const hasTraining = includesSafe(() => ns.bladeburner.getGeneralActionNames(), "Training");
-    if (hasTraining) return "Training";
-    return "Field Analysis";
-}
-
-function pickBestBlackOp(ns, minChance) {
-    const names = safeArr(() => ns.bladeburner.getBlackOpNames(), []);
-    if (!names.length) return null;
-
-    // Only attempt blackops that are “available” (remaining count > 0).
-    const candidates = [];
-    for (const name of names) {
-        const remaining = safeNum(() => ns.bladeburner.getActionCountRemaining("BlackOp", name), 0);
-        if (remaining <= 0) continue;
-
-        const chance = estimateChance(ns, "BlackOp", name);
-        if (chance < minChance) continue;
-
-        // Some versions expose rank requirement; if not, just rely on chance + remaining.
-        const rank = safeNum(() => ns.bladeburner.getRank(), 0);
-        const req = safeNum(() => ns.bladeburner.getBlackOpRank(name), 0);
-        if (req > 0 && rank < req) continue;
-
-        candidates.push({ name, chance, remaining, req });
-    }
-
-    // Prefer the *highest* rank requirement you can do (progression).
-    candidates.sort((a, b) => (b.req - a.req) || (b.chance - a.chance) || a.name.localeCompare(b.name));
-    return candidates[0] || null;
+function chanceInfo(ns, type, name) {
+    const pair = ns.bladeburner.getActionEstimatedSuccessChance(type, name);
+    const lo = pair[0], hi = pair[1];
+    const uncertainty = hi - lo;
+    // Smoother Conservative Chance: Weighted average that respects uncertainty
+    // If uncertainty is 0.4 (like yours), we stay very close to the 'lo' value.
+    const cons = lo + (uncertainty * 0.1);
+    return { cons, uncertainty };
 }
 
 function pickBestAction(ns, type, minChance) {
-    const names =
-        type === "Operation"
-            ? safeArr(() => ns.bladeburner.getOperationNames(), [])
-            : safeArr(() => ns.bladeburner.getContractNames(), []);
-
+    const names = (type === "Operations") ? ns.bladeburner.getOperationNames() : ns.bladeburner.getContractNames();
     const out = [];
     for (const name of names) {
-        const remaining = safeNum(() => ns.bladeburner.getActionCountRemaining(type, name), 0);
-        if (remaining <= 0) continue;
+        if (ns.bladeburner.getActionCountRemaining(type, name) <= 0) continue;
+        const ch = chanceInfo(ns, type, name);
+        if (ch.cons < minChance) continue;
 
-        const chance = estimateChance(ns, type, name);
-        if (chance < minChance) continue;
-
-        // Use a simple “expected success” score. Without deep formulas,
-        // (chance * remaining) is a decent proxy to avoid running out of tasks.
-        const score = chance * Math.min(1000, remaining);
-
-        out.push({ type, name, chance, remaining, score });
+        const t = Math.max(1, ns.bladeburner.getActionTime(type, name));
+        const val = ns.bladeburner.getActionRepGain(type, name);
+        const score = (val / t) * Math.pow(ch.cons, 3);
+        out.push({ type, name, chance: ch.cons, score });
     }
-
-    out.sort((a, b) => (b.score - a.score) || (b.chance - a.chance) || a.name.localeCompare(b.name));
-    return out[0] || null;
+    return out.sort((a, b) => b.score - a.score)[0] || null;
 }
 
-function pickByValue(bestOp, bestContract, opts) {
-    if (!bestOp && !bestContract) return null;
-    if (bestOp && !bestContract) return bestOp;
-    if (!bestOp && bestContract) return bestContract;
-
-    // Both exist. Respect preference unless the other is *meaningfully* better.
-    const preferOps = !!opts.preferOps;
-    const a = preferOps ? bestOp : bestContract;
-    const b = preferOps ? bestContract : bestOp;
-
-    // If b’s score is at least 15% better, take b.
-    if ((b.score || 0) > (a.score || 0) * 1.15) return b;
-    return a;
+function ensureAction(ns, type, name, msg, flags) {
+    const cur = safeObj(() => ns.bladeburner.getCurrentAction(), { type: "Idle", name: "Idle" });
+    if (norm(cur.type) === norm(type) && cur.name.toLowerCase() === name.toLowerCase()) return true;
+    if (safeBool(() => ns.bladeburner.startAction(type, name), false)) {
+        ns.print(msg);
+        return true;
+    }
+    return false;
 }
 
-function ensureAction(ns, type, name, reason) {
-    const cur = safeObj(() => ns.bladeburner.getCurrentAction(), null);
-    const curType = String(cur?.type ?? "");
-    const curName = String(cur?.name ?? "");
-
-    if (curType === type && curName === name) return true;
-
-    const ok = safeBool(() => ns.bladeburner.startAction(type, name), false);
-    if (ok) ns.print(reason);
-    else ns.print(`[bb] failed to start ${type}:${name}`);
-    return ok;
+function pickBestBlackOp(ns, minChance) {
+    const rawOp = ns.bladeburner.getNextBlackOp();
+    if (!rawOp) return null;
+    const opName = (typeof rawOp === 'object') ? rawOp.name : rawOp;
+    if (!opName || ns.bladeburner.getRank() < ns.bladeburner.getBlackOpRank(opName)) return null;
+    const ch = chanceInfo(ns, "Black Ops", opName);
+    return (ch.cons >= minChance) ? { name: opName, chance: ch.cons } : null;
 }
 
-function estimateChance(ns, type, name) {
-    const pair = safeArr(() => ns.bladeburner.getActionEstimatedSuccessChance(type, name), [0, 0]);
-    const lo = Number(pair?.[0] ?? 0);
-    const hi = Number(pair?.[1] ?? 0);
-    // Conservative: use low bound (avoids surprise fails early in BN6)
-    return clamp01(lo || 0);
+function pickChaosReduction(ns, minChance) {
+    const ch = chanceInfo(ns, "Operations", "Stealth Retirement");
+    if (ch.cons >= minChance && ns.bladeburner.getActionCountRemaining("Operations", "Stealth Retirement") > 0) {
+        return { type: "Operations", name: "Stealth Retirement" };
+    }
+    return { type: "General", name: "Diplomacy" };
 }
-
-// -----------------------------------------------------------------------------
-// Skill spending
-// -----------------------------------------------------------------------------
 
 function spendSkillPoints(ns) {
-    const points = safeNum(() => ns.bladeburner.getSkillPoints(), 0);
-    if (points <= 0) return;
-
-    const skills = safeArr(() => ns.bladeburner.getSkillNames(), []);
-
-    // Priority: survivability + success + stamina economy.
-    // We only upgrade skills that exist in this version/save.
-    const priority = [
-        "Overclock",
-        "Reaper",
-        "Evasive System",
-        "Evasive Systems",
-        "Cloak",
-        "Digital Observer",
-        "Blade's Intuition",
-        "Hyperdrive",
-        "Hands of Midas",
-    ].filter((s) => skills.includes(s));
-
-    for (let i = 0; i < 50; i++) {
-        const p = safeNum(() => ns.bladeburner.getSkillPoints(), 0);
-        if (p <= 0) return;
-
-        let upgraded = false;
-
-        for (const sk of priority) {
-            const cost = safeNum(() => ns.bladeburner.getSkillUpgradeCost(sk), Infinity);
-            if (cost <= p) {
-                const ok = safeBool(() => ns.bladeburner.upgradeSkill(sk, 1), false);
-                if (ok) {
-                    ns.print(`[bb] skill+ ${sk}`);
-                    upgraded = true;
-                    break;
-                }
-            }
-        }
-
-        if (!upgraded) return;
+    const sp = ns.bladeburner.getSkillPoints();
+    if (sp <= 0) return;
+    const plan = ["Blade's Intuition", "Tracer", "Digital Observer", "Reaper", "Cyber's Edge"];
+    for (const sk of plan) {
+        const cost = ns.bladeburner.getSkillUpgradeCost(sk);
+        if (cost <= ns.bladeburner.getSkillPoints()) ns.bladeburner.upgradeSkill(sk, 1);
     }
 }
 
-// -----------------------------------------------------------------------------
-// Small safe helpers
-// -----------------------------------------------------------------------------
-
-function hasBladeburner(ns) {
-    return !!ns.bladeburner
-        && typeof ns.bladeburner.inBladeburner === "function"
-        && typeof ns.bladeburner.startAction === "function";
-}
-
-function clamp01(x) {
-    x = Number(x) || 0;
-    return Math.min(1, Math.max(0, x));
-}
-
-function safeNum(fn, fallback) {
-    try {
-        const v = Number(fn());
-        return Number.isFinite(v) ? v : fallback;
-    } catch {
-        return fallback;
+function handleCityHopping(ns, flags, state) {
+    if (!flags.cityHop) return;
+    const now = Date.now();
+    if (now - state.lastCitySwitchAt < flags.cityHopCooldownMs) return;
+    const cities = ["Sector-12", "Aevum", "Volhaven", "Chongqing", "New Tokyo", "Ishima"];
+    let bestCity = ns.bladeburner.getCity(), bestScore = -1;
+    for (const c of cities) {
+        const pop = ns.bladeburner.getCityCommunities(c);
+        const chaos = ns.bladeburner.getCityChaos(c);
+        const score = pop * (1 - (chaos * 0.02));
+        if (score > bestScore) { bestScore = score; bestCity = c; }
+    }
+    if (bestCity !== ns.bladeburner.getCity()) {
+        ns.bladeburner.switchCity(bestCity);
+        state.lastCitySwitchAt = now;
     }
 }
 
-function safeBool(fn, fallback) {
-    try { return Boolean(fn()); } catch { return fallback; }
-}
+function safeNum(fn, fallback) { try { return Number(fn()) || fallback; } catch { return fallback; } }
+function safeBool(fn, fallback) { try { return Boolean(fn()); } catch { return fallback; } }
+function safeStr(fn, fallback) { try { return String(fn()); } catch { return fallback; } }
+function safeObj(fn, fallback) { try { const r = fn(); return r !== undefined && r !== null ? r : fallback; } catch { return fallback; } }
 
-function safeStr(fn, fallback) {
-    try { return String(fn()); } catch { return fallback; }
-}
-
-function safeArr(fn, fallback) {
-    try {
-        const v = fn();
-        return Array.isArray(v) ? v : fallback;
-    } catch {
-        return fallback;
-    }
-}
-
-function safeObj(fn, fallback) {
-    try { return fn(); } catch { return fallback; }
-}
-
-function includesSafe(fn, item) {
-    try {
-        const a = fn();
-        return Array.isArray(a) && a.includes(item);
-    } catch {
-        return false;
-    }
-}
-
-/** @param {NS} ns */
 function printHelp(ns) {
-    ns.tprint("/bin/bladeburner-manager.js");
-    ns.tprint("");
-    ns.tprint("Description");
-    ns.tprint("  BN6 Bladeburner automation daemon (join/skills/city/actions/blackops).");
-    ns.tprint("");
-    ns.tprint("Notes");
-    ns.tprint("  - Requires Bladeburner API (BN6 or SF7+).");
-    ns.tprint("  - Conservative defaults: uses LOW success chance estimate to avoid fail spirals.");
-    ns.tprint("  - Chaos is controlled via Diplomacy; stamina via Training/Field Analysis.");
-    ns.tprint("");
-    ns.tprint("Syntax");
-    ns.tprint("  run /bin/bladeburner-manager.js");
-    ns.tprint("  run /bin/bladeburner-manager.js --minChance 0.75 --blackopMinChance 0.85");
-    ns.tprint("  run /bin/bladeburner-manager.js --city \"Sector-12\" --chaosThresh 40");
-    ns.tprint("  run /bin/bladeburner-manager.js --autoJoin false");
-    ns.tprint("  run /bin/bladeburner-manager.js --help");
-    ns.tprint("");
-    ns.tprint("Flags");
-    ns.tprint("  --loop true|false             Loop forever (default true)");
-    ns.tprint("  --pollMs <ms>                 Poll interval (default 2500)");
-    ns.tprint("  --autoJoin true|false         Attempt to join BB when eligible (default true)");
-    ns.tprint("  --minChance <0..1>            Min chance for contracts/ops (default 0.70)");
-    ns.tprint("  --blackopMinChance <0..1>     Min chance for blackops (default 0.80)");
-    ns.tprint("  --staminaMinFrac <0..1>       Recover below this stamina fraction (default 0.55)");
-    ns.tprint("  --chaosThresh <n>             Diplomacy above this chaos (default 50)");
-    ns.tprint("  --preferOps true|false        Prefer operations over contracts (default true)");
-    ns.tprint("  --city <name>                 Optional city lock (default none)");
-    ns.tprint("  --spendSkills true|false      Auto-upgrade skills (default true)");
+    ns.tprint("Bladeburner Manager - Level Management Edition");
 }
